@@ -7,7 +7,6 @@ __pycache__/
 .eggs/
 dist/
 build/
-*.spec
 *.zip
 *.log
 
