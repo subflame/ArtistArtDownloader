@@ -1,12 +1,12 @@
 # Artist Art Downloader
 
-A desktop application that scans music libraries, reads artist metadata from audio file tags, searches for artist images on Apple Music and Deezer, and saves them to disk. Uses a Tkinter GUI ? no command-line interface.
+A desktop application that scans music libraries, reads artist metadata from audio file tags, searches for artist images on Apple Music and Deezer, and saves them to disk. Uses a Tkinter GUI — no command-line interface.
 
 ---
 
 ## About
 
-Artist Art Downloader processes a folder of audio files, extracts artist names from ID3/FLAC/Vorbis tags, searches for matching artist images across two streaming platforms (Apple Music and Deezer), and saves the images as JPEG or PNG files alongside the album directories. The application handles collaboration markers (feat., &, and), non-Latin script transliteration, genre-based disambiguation, and HTTP rate limiting.
+Artist Art Downloader processes a folder of audio files, extracts artist names from ID3/FLAC/Vorbis tags, searches for matching artist images across two streaming platforms (Apple Music and Deezer), and saves the images as JPEG or PNG files alongside the album directories. The application handles collaboration markers (feat., &, and), non-Latin script transliteration, multi-artist tags, genre-based disambiguation, and HTTP rate limiting.
 
 Supported sources:
 - Apple Music (iTunes Search API + Apple Music page scraping for og:image)
@@ -27,12 +27,18 @@ Supported sources:
 - Falls back to filename parsing when tags are missing or corrupted
 - Detects compilation albums (Various Artists) and skips them
 
+**Multi-artist tag handling**
+- Detects multiple artists in a single tag (e.g., "Eminem, Dr. Dre", "Artist1 & Artist2")
+- Shows a selection dialog to choose which artist to search for
+- Splits by: commas, `&`, "and"/"et"/"und"/"y"/"e", "feat."/"ft." markers
+
 **Artist name normalization**
 - Strips collaboration markers: feat., ft., featuring, f., vs., with, w/, presents, prod., and, &
 - Strips comma-separated collaborators: "Eminem, Dr. Dre" -> "Eminem"
 - Strips parenthesized collabs: "(feat. Guest)" -> ""
 - Normalizes conjunctions (and, et, und, y, e) for matching
 - Accent-insensitive comparison via NFKD decomposition
+- Cross-script transliteration for comparison (Cyrillic, CJK, Hangul, Japanese)
 
 **Image search**
 - Search order by specificity: album name + year -> track name -> artist name
@@ -81,7 +87,7 @@ Supported sources:
 
 **Transliteration**
 - Cyrillic, Japanese hiragana/katakana, Korean hangul, and common Chinese characters mapped to Latin equivalents
-- Multi-character sequences (e.g. "??" -> "kya") applied before single-character maps
+- Multi-character sequences (e.g. "кя" -> "kya") applied before single-character maps
 - Used to build Apple Music URL slugs for non-Latin artist names
 
 **User interface**
@@ -98,7 +104,7 @@ Supported sources:
 
 ## Prerequisites
 
-- Python 3.10 or later (uses `str.removeprefix` and structural pattern matching is not used, but type hint syntax requires 3.10+)
+- Python 3.10 or later
 - Windows, macOS, or Linux (tested on Windows 11)
 - Internet connection for API access
 
@@ -108,8 +114,8 @@ Supported sources:
 
 ```bash
 # Clone the repository
-git clone https://github.com/subflame/nukkiapps.git
-cd nukkiapps
+git clone https://github.com/subflame/ArtistArtDownloader.git
+cd ArtistArtDownloader
 
 # Create and activate a virtual environment (recommended)
 python -m venv venv
@@ -136,7 +142,7 @@ The executable will be written to `dist/ArtistArtDownloader.exe`.
 
 ## Usage
 
-The application has a graphical interface ? no command-line arguments. All settings are configured through the GUI.
+The application has a graphical interface — no command-line arguments. All settings are configured through the GUI.
 
 ### Basic workflow
 
@@ -147,28 +153,32 @@ The application has a graphical interface ? no command-line arguments. All setti
 5. The application scans the folder, searches for images, and downloads them.
 6. Results appear in the log panel with color-coded status.
 
+### Multi-artist tags
+
+If a tag contains multiple artists (e.g., "Eminem, Dr. Dre" or "Artist1 & Artist2"), a dialog appears letting you choose which artist to search for. This prevents the app from picking the wrong artist automatically.
+
 ### Settings
 
 Accessible via the Settings button in the top-right corner.
 
 **Image source**
-- Apple Music (recommended) ? searches iTunes Search API and scrapes og:image from Apple Music artist pages.
-- Deezer ? searches the Deezer API for artist pictures.
+- Apple Music (recommended) — searches iTunes Search API and scrapes og:image from Apple Music artist pages.
+- Deezer — searches the Deezer API for artist pictures.
 
 **Theme**
 - Gruvbox, Catppuccin, Light, Midnight, Dracula
 
 **Output format**
-- JPEG (.jpg) ? default, adjustable quality.
-- PNG (.png) ? converts JPEG sources to PNG; saves PNG sources as-is.
+- JPEG (.jpg) — default, adjustable quality.
+- PNG (.png) — converts JPEG sources to PNG; saves PNG sources as-is.
 
-**JPEG quality** (1-100) ? shown only when JPEG format is selected.
+**JPEG quality** (1-100) — shown only when JPEG format is selected.
 
-**Save to separate folder** ? all images are written to a single directory instead of alongside album folders. When enabled, filenames always use the artist name.
+**Save to separate folder** — all images are written to a single directory instead of alongside album folders. When enabled, filenames always use the artist name.
 
-**Use artist name as filename** ? saves as "ArtistName.jpg" instead of "artist.jpg".
+**Use artist name as filename** — saves as "ArtistName.jpg" instead of "artist.jpg".
 
-**Skip merge dialog** ? automatically applies saved artist aliases without prompting.
+**Skip merge dialog** — automatically applies saved artist aliases without prompting.
 
 ### Artist merging
 
@@ -207,7 +217,7 @@ Settings are persisted to `~/.config/artist_art_downloader/settings.json`.
 
 The artist image URL cache is stored in `~/.config/artist_art_downloader/artist_cache.json` and expires after 7 days.
 
-No environment variables or API keys are required ? both Apple Music and Deezer APIs are public.
+No environment variables or API keys are required — both Apple Music and Deezer APIs are public.
 
 ---
 
@@ -215,8 +225,9 @@ No environment variables or API keys are required ? both Apple Music and Deezer 
 
 1. Scan phase: `scan_folder()` walks the directory tree, reads audio tags via TinyTag, groups metadata by artist.
 2. Alias phase: saved aliases are applied, similar names are detected and optionally merged.
-3. Search phase: for each artist, the application searches the selected API (album -> track -> name), respecting genre filters.
-4. Download phase: found image URLs are downloaded in parallel (4 threads), validated, optionally converted, and saved to disk.
+3. Multi-artist phase: tags with multiple artists are split and resolved via user dialog.
+4. Search phase: for each artist, the application searches the selected API (album -> track -> name), respecting genre filters.
+5. Download phase: found image URLs are downloaded in parallel (4 threads), validated, optionally converted, and saved to disk.
 
 The GUI runs the search phase on a background thread, with the main thread handling UI updates via `after()` callbacks. The download phase uses `ThreadPoolExecutor` for parallel HTTP requests.
 
