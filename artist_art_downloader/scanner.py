@@ -193,6 +193,41 @@ def _strip_collaboration_markers(artist: str) -> str:
     return artist
 
 
+def split_artists(artist: str) -> list[str]:
+    """Split a multi-artist tag string into individual artist names.
+
+    Handles:
+      "Eminem, Dr. Dre"              -> ["Eminem", "Dr. Dre"]
+      "Quasimoto & Madlib"           -> ["Quasimoto", "Madlib"]
+      "Artist1 and Artist2"          -> ["Artist1", "Artist2"]
+      "Eminem feat. Dr. Dre"         -> ["Eminem", "Dr. Dre"]
+      "Artist"                       -> ["Artist"]
+    """
+    # First try comma split (most common multi-artist delimiter)
+    if ',' in artist:
+        parts = [a.strip() for a in artist.split(',') if a.strip()]
+        if len(parts) > 1:
+            return parts
+
+    # Try & split
+    if '&' in artist:
+        parts = [a.strip() for a in artist.split('&') if a.strip()]
+        if len(parts) > 1:
+            return parts
+
+    # Try " and " split (case-insensitive, word boundary)
+    m = re.split(r'\s+(?:and|et|und|y|e)\s+', artist, flags=re.IGNORECASE)
+    if len(m) > 1:
+        return [a.strip() for a in m if a.strip()]
+
+    # Try feat./ft. split
+    m = re.split(r'\s+(?:feat\.?|ft\.?|featuring)\s+', artist, flags=re.IGNORECASE)
+    if len(m) > 1:
+        return [a.strip() for a in m if a.strip()]
+
+    return [artist]
+
+
 def _parse_artist_from_filename(file_path: Path) -> Optional[str]:
     """Extract artist name from filename when tags are missing.
 

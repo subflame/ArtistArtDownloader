@@ -13,7 +13,7 @@ from typing import Optional
 import pystray
 
 from .config import Settings, THEMES, ArtistCache
-from .scanner import scan_folder, artist_image_exists, get_artist_root, find_similar_artists, merge_artists
+from .scanner import scan_folder, artist_image_exists, get_artist_root, find_similar_artists, merge_artists, split_artists
 from .utils import sanitize_filename
 from .fetcher import fetch_artist_image, download_image, search_artist_candidates, fetch_artist_image_by_id, fetch_candidate_preview, fetch_artist_image_by_track_only, fetch_artist_image_by_album_only
 
@@ -484,6 +484,18 @@ class App(tk.Tk):
         # Collect work items (search + download per artist)
         work_items = []
         for artist_name, ctx in artists.items():
+            # Check for multiple artists in tag (e.g. "Eminem, Dr. Dre")
+            alternatives = split_artists(artist_name)
+            if len(alternatives) > 1:
+                self._log(f"  Multiple artists found: {artist_name}", "info")
+                chosen = self._prompt_multi_artist(artist_name, alternatives)
+                if not chosen:
+                    self._log(f"  [skip] {artist_name} -- user skipped", "skip")
+                    continue
+                # Replace artist name with chosen one
+                artist_name = chosen
+                self._log(f"  Selected: {artist_name}", "success")
+
             if not ctx.album_dirs:
                 self._log(f"  [X] {artist_name} -- no album directories", "error")
                 failed += 1
@@ -701,6 +713,27 @@ class App(tk.Tk):
             # User skipped or chosen candidate has no image -> keep current URL
         return current_url
 
+    def _prompt_multi_artist(self, original_name: str, alternatives: list[str]):
+        """Show dialog to pick one artist from a multi-artist tag string.
+
+        Blocks until user responds. Returns chosen artist name or None if skipped.
+        """
+        import threading
+
+        self._multi_artist_result = None
+        self._multi_artist_event = threading.Event()
+
+        def show_dialog():
+            dialog = MultiArtistDialog(self, original_name, alternatives)
+            self.wait_window(dialog)
+            self._multi_artist_event.set()
+
+        self.after(0, show_dialog)
+        self._multi_artist_event.wait(timeout=300)
+        if not self._multi_artist_event.is_set():
+            return None
+        return self._multi_artist_result
+
     def _prompt_merge_artists(self, groups, artists):
         """Show merge dialog (from bg thread). Blocks until user responds."""
         import threading
@@ -897,6 +930,84 @@ class SettingsDialog(tk.Toplevel):
         self.settings.skip_merge_dialog = self.merge_skip_var.get()
         self.settings.separate_folder = self.sep_path_var.get() if self.sep_var.get() else ""
         self.on_apply()
+        self.destroy()
+
+
+class MultiArtistDialog(tk.Toplevel):
+    """Dialog to pick one artist from a multi-artist tag (e.g. 'Eminem, Dr. Dre')."""
+
+    def __init__(self, parent: App, original_name: str, alternatives: list[str]):
+        super().__init__(parent)
+        t = parent.settings.get_theme()
+        self.configure(bg=t["bg"])
+        self.title(f"Multiple artists in tag")
+        self.geometry("420x300")
+        self.minsize(380, 250)
+        self.transient(parent)
+        self.grab_set()
+
+        main = ttk.Frame(self, padding=16)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            main,
+            text=f'The tag contains multiple artists:\n"{original_name}"\n\nSelect which artist to use:',
+            style="Warning.TLabel", wraplength=380,
+        ).pack(anchor=tk.W, pady=(0, 12))
+
+        # Listbox with alternatives
+        list_frame = ttk.Frame(main)
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
+
+        self.listbox = tk.Listbox(
+            list_frame, font=("Segoe UI", 10), bd=0,
+            highlightthickness=0, selectbackground=t["list_select"],
+            bg=t["entry_bg"], fg=t["entry_fg"],
+        )
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.listbox.yview)
+        self.listbox.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        for a in alternatives:
+            self.listbox.insert(tk.END, a)
+        self.listbox.selection_set(0)
+
+        self.result = None
+
+        # Buttons
+        btn_frame = ttk.Frame(main)
+        btn_frame.pack(fill=tk.X)
+        ttk.Button(btn_frame, text="Skip", style="Small.TButton",
+                   command=self._skip).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="Use All (search first only)", style="Small.TButton",
+                   command=self._use_first).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(btn_frame, text="OK", style="Accent.TButton",
+                   command=self._ok).pack(side=tk.RIGHT)
+
+        self.protocol("WM_DELETE_WINDOW", self._skip)
+
+        # Center on parent
+        self.update_idletasks()
+        pw, ph = parent.winfo_width(), parent.winfo_height()
+        px, py = parent.winfo_x(), parent.winfo_y()
+        w, h = self.winfo_width(), self.winfo_height()
+        self.geometry(f"+{px + (pw - w) // 2}+{py + (ph - h) // 2}")
+
+    def _ok(self):
+        sel = self.listbox.curselection()
+        if sel:
+            self.result = self.listbox.get(sel[0])
+        self.master._multi_artist_result = self.result
+        self.destroy()
+
+    def _use_first(self):
+        self.result = self.listbox.get(0)
+        self.master._multi_artist_result = self.result
+        self.destroy()
+
+    def _skip(self):
+        self.master._multi_artist_result = None
         self.destroy()
 
 
