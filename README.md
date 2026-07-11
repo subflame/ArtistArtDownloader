@@ -1,128 +1,121 @@
-# Artist Art Downloader 🎵🖼️
+# Artist Art Downloader
 
-**Графическое приложение для автоматического скачивания обложек/изображений артистов** с Apple Music и Deezer.
-
-Сканирует вашу музыкальную коллекцию, определяет артистов по тегам MP3/FLAC, находит их изображения через API стриминговых сервисов и сохраняет прямо в папку с музыкой.
+A desktop tool that scans your music library, reads artist tags from audio files, finds artist images via Apple Music and Deezer APIs, and saves them alongside your albums.
 
 ---
 
-## Возможности
+## Features
 
-- 🔍 **Автоматическое сканирование** — рекурсивно обходит папки с музыкой
-- 🏷️ **Чтение тегов** — извлекает артиста, альбом, жанр, год, название трека (через TinyTag)
-- 🎯 **Умный поиск** — ищет по альбому → треку → имени (в порядке убывания точности)
-- 🧹 **Очистка коллабораций** — `"Eminem feat. Dr. Dre"`, `"Quasimoto & Madlib"`, `"Artist1, Artist2"` → только первый артист
-- 🌐 **Два источника** — Apple Music (рекомендуется) и Deezer с переключением в один клик
-- 📦 **Кэширование** — результаты поиска кэшируются на 7 дней (не душит API)
-- 🎨 **5 тем оформления** — Gruvbox, Catppuccin, Light, Midnight, Dracula
-- 🪟 **Сворачивание в трей** — при minimise окно прячется в системный трей
-- 🖼️ **Поддержка форматов** — JPEG и PNG, настраиваемое качество JPEG
-- 📁 **Отдельная папка** — можно сохранять все изображения в отдельную папку
-- 🔀 **Слияние артистов** — автоматическое обнаружение дубликатов (`"Big Pun"` ↔ `"Big Punisher"`)
-- 🌍 **Транслитерация** — кириллица, японский, китайский, корейский → латиница (для URL)
-- 🧵 **Многопоточная загрузка** — скачивание изображений в 4 потока
-- ⏭️ **Пропуск существующих** — не качает повторно то, что уже есть
+- **Auto-scan** — recursively scans folders for MP3/FLAC/OGG/M4A files
+- **Tag reading** — extracts artist, album, genre, year and track name via TinyTag
+- **Smart search** — searches by album → track → name (most to least specific)
+- **Collab stripping** — `"Eminem feat. Dr. Dre"`, `"Quasimoto & Madlib"`, `"Artist1, Artist2"` → first artist only
+- **Two sources** — Apple Music (recommended) and Deezer, switchable in settings
+- **Caching** — results cached for 7 days to avoid hammering APIs
+- **5 themes** — Gruvbox, Catppuccin, Light, Midnight, Dracula
+- **System tray** — minimizes to tray instead of taskbar
+- **Output formats** — JPEG and PNG, adjustable JPEG quality
+- **Separate folder** — save all images to a single folder
+- **Artist merging** — detects similar names (`"Big Pun"` ↔ `"Big Punisher"`)
+- **Transliteration** — Cyrillic, Japanese, Chinese, Korean → Latin (for URLs)
+- **Multi-threaded download** — 4 parallel workers
+- **Skip existing** — doesn't re-download images that already exist
 
 ---
 
-## Установка
+## Installation
 
-### Вариант 1: Готовый .exe (рекомендуется)
+### Option 1: Download .exe
 
-Скачайте `ArtistArtDownloader.exe` из [релизов](https://github.com/subflame/nukkiapps/releases) — ничего устанавливать не нужно.
+Grab `ArtistArtDownloader.exe` from the [releases page](https://github.com/subflame/nukkiapps/releases) — no installation needed.
 
-### Вариант 2: Из исходников
+### Option 2: Run from source
 
 ```bash
-# Клонируйте репозиторий
 git clone https://github.com/subflame/nukkiapps.git
 cd nukkiapps
-
-# Установите зависимости
 pip install -r requirements.txt
-
-# Запустите
 python run.py
 ```
 
-### Сборка .exe
+### Build .exe yourself
 
 ```bash
 pip install pyinstaller
 pyinstaller ArtistArtDownloader.spec --clean
 ```
 
-Готовый .exe появится в папке `dist/`.
+The .exe will be in `dist/`.
 
 ---
 
-## Использование
+## Usage
 
-1. **Запустите** программу (ArtistArtDownloader.exe или `python run.py`)
-2. **Выберите папку** с музыкой (кнопка «Browse»)
-3. **Настройте источник** (Apple Music / Deezer) в настройках
-4. **Нажмите «Start»** — программа отсканирует папку и начнёт поиск
-5. **Готово!** Изображения сохранятся рядом с альбомами как `artist.jpg`
+1. **Launch** the app (ArtistArtDownloader.exe or `python run.py`)
+2. **Pick a folder** with music (Browse button)
+3. **Choose source** (Apple Music / Deezer) in Settings
+4. **Hit Start** — it scans the folder and starts searching
+5. **Done** — images are saved as `ArtistName.jpg` next to the album folders
 
-### Формат сохранения
+### Save format
 
-По умолчанию изображения сохраняются как `{ArtistName}.jpg` (или `artist.jpg`, если отключено в настройках).
+By default images are saved as `{ArtistName}.jpg` (or `artist.jpg` if the option is off).
 
-Можно включить **отдельную папку** — тогда все изображения сохранятся туда в формате `{ArtistName}.jpg/.png`.
+You can enable **separate folder** in settings — all images go there as `{ArtistName}.jpg/.png`.
 
 ---
 
-## Требования
+## Requirements
 
-- **Python 3.10+** (для запуска из исходников)
+- **Python 3.10+** (if running from source)
 - **Windows / macOS / Linux**
-- Зависимости: `tinytag`, `requests`, `Pillow`, `pystray`
+- Dependencies: `tinytag`, `requests`, `Pillow`, `pystray`
 
 ---
 
-## Структура проекта
+## Project structure
 
 ```
 artist_art_downloader/
-├── __init__.py          # Версия пакета
-├── main.py              # Точка входа (проверка зависимостей)
-├── config.py            # Настройки, темы, кэш (JSON)
-├── utils.py             # Нормализация имён, санобработка файлов
-├── scanner.py           # Сканирование папок, чтение тегов, мерж артистов
-├── fetcher.py           # HTTP-клиент, API Apple Music / Deezer, скачка
-├── gui.py               # Tkinter GUI + системный трей
-├── translit_maps.py     # Карты транслитерации для URL-slug
+  __init__.py          # Package version
+  main.py              # Entry point (dependency check)
+  config.py            # Settings, themes, cache (JSON)
+  utils.py             # Name normalization, filename sanitization
+  scanner.py           # Folder scanning, tag reading, artist merging
+  fetcher.py           # HTTP client, Apple Music / Deezer API, downloads
+  gui.py               # Tkinter GUI + system tray
+  translit_maps.py     # Transliteration tables for URL slug generation
 
-run.py                   # Скрипт запуска
-ArtistArtDownloader.spec # Конфиг PyInstaller
+run.py                   # Launch script
+ArtistArtDownloader.spec # PyInstaller config
 ```
 
 ---
 
-## Технические детали
+## How it works
 
-### Поиск изображений
+### Image search
 
-Приложение использует **публичные API** (без ключей):
-- **Deezer API** — поиск артистов по названию, фильтрация по жанру
-- **iTunes Search API** — поиск по альбому/треку, получение artistId
-- **Apple Music** — парсинг og:image с веб-страницы артиста
+The app uses **public APIs** (no keys required):
+- **Deezer API** — search artists by name, filter by genre
+- **iTunes Search API** — search by album/track, get artistId
+- **Apple Music** — parse og:image from the artist's web page
 
-### Очистка имён артистов
+### Artist name cleanup
 
-Перед поиском из имени артиста удаляются:
+Before searching, collaboration markers are stripped:
 - `feat.`, `ft.`, `featuring`, `f.`
-- `&`, `and` (и аналоги на других языках)
+- `&`, `and` (and equivalents in other languages)
 - `vs.`, `with`, `w/`, `presents`, `prod.`
-- Запятые (`"Eminem, Dr. Dre"` → `"Eminem"`)
-- Скобки с коллаборациями (`"(feat. Guest)"`)
+- Commas (`"Eminem, Dr. Dre"` → `"Eminem"`)
+- Parenthesized collabs (`"(feat. Guest)"`)
 
-### Транслитерация
+### Transliteration
 
-Для нелатинских имён (кириллица, CJK) применяется транслитерация при формировании URL-путей к Apple Music.
+Non-Latin names (Cyrillic, CJK) are transliterated when building Apple Music URLs.
 
 ---
 
-## Лицензия
+## License
 
 MIT
