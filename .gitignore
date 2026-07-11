@@ -1,0 +1,38 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+*.spec
+*.zip
+*.log
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- OS ---
+Thumbs.db
+.DS_Store
+
+# --- Project specific ---
+# Personal prompts (not code)
+prompt*.txt
+
+# Test files
+test_*.py
+
+# Backup folder
+backup/
+
+# Generated icon script
+generate_icon.py
+
+# Runtime
+*.exe
