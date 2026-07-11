@@ -87,17 +87,6 @@ Two matching strategies:
 - iTunes artwork URLs are scaled from `100x100` to `600x600`
 - Deezer artist images prefer `picture_xl`, falling back to `picture_big`
 
-### Bulk Discography Download
-
-- Fetches full discographies from Deezer or iTunes (album count, cover art, release dates)
-- Deezer: paginated album fetching (25 per page), with rate-limit and error tracking
-- iTunes: single call fetching up to 200 albums
-- Artist-level cover download (optional)
-- Streaming download to `.tmp` file with atomic rename on success
-- Resume support: albums with existing cover files (>1 KB) are skipped
-- Path sanitization with proportional truncation for Windows 260-char path limits
-- Path traversal prevention via `safe_join()` which resolves paths and verifies they stay within the output root
-
 ### Artist Merging
 
 - Detects similar artist names using `difflib.SequenceMatcher` (cutoff: 0.7 similarity)
@@ -113,7 +102,6 @@ Two matching strategies:
 - Handles Windows reserved names: `CON`, `NUL`, `PRN`, `AUX`, `COM1`-`COM9`, `LPT1`-`LPT9`
 - Prevents empty or dots-only names (would resolve to current directory)
 - Filename length capped at 200 characters
-- Bulk mode uses NFKC normalization (preserves accents, CJK, emoji) with separate illegal character filtering
 
 ### Caching
 
