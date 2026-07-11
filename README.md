@@ -29,14 +29,14 @@
 
 ### Вариант 1: Готовый .exe (рекомендуется)
 
-Скачайте `ArtistArtDownloader.exe` из [релизов](https://github.com/YOUR_USERNAME/artist-art-downloader/releases) — ничего устанавливать не нужно.
+Скачайте `ArtistArtDownloader.exe` из [релизов](https://github.com/subflame/nukkiapps/releases) — ничего устанавливать не нужно.
 
 ### Вариант 2: Из исходников
 
 ```bash
 # Клонируйте репозиторий
-git clone https://github.com/YOUR_USERNAME/artist-art-downloader.git
-cd artist-art-downloader
+git clone https://github.com/subflame/nukkiapps.git
+cd nukkiapps
 
 # Установите зависимости
 pip install -r requirements.txt
