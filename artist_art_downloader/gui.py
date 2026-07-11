@@ -16,7 +16,6 @@ from .config import Settings, THEMES, ArtistCache
 from .scanner import scan_folder, artist_image_exists, get_artist_root, find_similar_artists, merge_artists
 from .utils import sanitize_filename
 from .fetcher import fetch_artist_image, download_image, search_artist_candidates, fetch_artist_image_by_id, fetch_candidate_preview, fetch_artist_image_by_track_only, fetch_artist_image_by_album_only
-from .bulk_downloader import run_bulk_download
 
 APP_VERSION = "1.0.1"
 
@@ -167,32 +166,12 @@ class App(tk.Tk):
         ttk.Button(header, text="Settings", style="Small.TButton",
                    command=self._open_settings).pack(side=tk.RIGHT)
 
-        # -- Mode switcher --
-        mode_frame = ttk.Frame(main)
-        mode_frame.pack(fill=tk.X, pady=(0, 12))
-        self.mode_var = tk.StringVar(value="scanner")
-        ttk.Radiobutton(mode_frame, text="Scanner mode (local music folder)",
-                        variable=self.mode_var, value="scanner",
-                        command=self._on_mode_change).pack(side=tk.LEFT, padx=(0, 16))
-        ttk.Radiobutton(mode_frame, text="Bulk mode (download all album covers)",
-                        variable=self.mode_var, value="bulk",
-                        command=self._on_mode_change).pack(side=tk.LEFT)
-
-        # -- Scanner mode frame (existing) --
+        # -- Scanner mode frame --
         self.scanner_frame = ttk.Frame(main)
         self._build_scanner_ui(self.scanner_frame)
         self.scanner_frame.pack(fill=tk.X, pady=(0, 12))
 
-        # -- Bulk mode frame (new) --
-        self.bulk_frame = ttk.Frame(main)
-        self._build_bulk_ui(self.bulk_frame)
-        # Initially hidden
-        self.bulk_frame.pack_forget()
-
-        # -- Shared: buttons, progress, log (used by both modes) --
-        self._shared_parent = main  # reference for mode switching
-
-        # -- Shared: buttons, progress, log (used by both modes) --
+        # -- Buttons, progress, log --
         btn_frame = ttk.Frame(main)
         btn_frame.pack(fill=tk.X, pady=(0, 12))
         self.start_btn = ttk.Button(btn_frame, text="Start", style="Accent.TButton",
@@ -291,17 +270,6 @@ class App(tk.Tk):
         except Exception:
             pass
 
-    # -- Mode switcher ------------------------------------------------------
-
-    def _on_mode_change(self):
-        """Toggle between scanner and bulk mode."""
-        if self.mode_var.get() == "scanner":
-            self.bulk_frame.pack_forget()
-            self.scanner_frame.pack(fill=tk.X, pady=(0, 12), after=self._shared_parent.winfo_children()[1])
-        else:
-            self.scanner_frame.pack_forget()
-            self.bulk_frame.pack(fill=tk.X, pady=(0, 12), after=self._shared_parent.winfo_children()[1])
-
     def _build_scanner_ui(self, parent):
         """Build the scanner-mode controls (folder picker, skip checkbox)."""
         folder_frame = ttk.Frame(parent)
@@ -320,57 +288,9 @@ class App(tk.Tk):
         ttk.Checkbutton(parent, text="Skip artists with existing artist.jpg",
                          variable=self.skip_var).pack(anchor=tk.W)
 
-    def _build_bulk_ui(self, parent):
-        """Build the bulk-mode controls (artist name, output, options)."""
-        # Row 1: Artist name
-        artist_frame = ttk.Frame(parent)
-        artist_frame.pack(fill=tk.X, pady=(0, 8))
-        ttk.Label(artist_frame, text="Artist name:").pack(anchor=tk.W, pady=(0, 4))
-        self.bulk_artist_var = tk.StringVar()
-        ttk.Entry(artist_frame, textvariable=self.bulk_artist_var).pack(fill=tk.X)
-
-        # Row 2: Output folder
-        output_frame = ttk.Frame(parent)
-        output_frame.pack(fill=tk.X, pady=(0, 8))
-        ttk.Label(output_frame, text="Output folder:").pack(anchor=tk.W, pady=(0, 4))
-        output_row = ttk.Frame(output_frame)
-        output_row.pack(fill=tk.X)
-        self.bulk_output_var = tk.StringVar()
-        self.bulk_output_entry = ttk.Entry(output_row, textvariable=self.bulk_output_var)
-        self.bulk_output_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
-        ttk.Button(output_row, text="Browse", style="Small.TButton",
-                   command=self._browse_bulk_output).pack(side=tk.RIGHT)
-
-        # Row 3: Options
-        opts = ttk.Frame(parent)
-        opts.pack(fill=tk.X, pady=(0, 4))
-        self.bulk_skip_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opts, text="Skip existing covers",
-                         variable=self.bulk_skip_var).pack(anchor=tk.W)
-        self.bulk_artist_cover_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opts, text="Also download artist cover",
-                         variable=self.bulk_artist_cover_var).pack(anchor=tk.W)
-
-        # Max albums
-        max_frame = ttk.Frame(opts)
-        max_frame.pack(fill=tk.X, pady=(4, 0))
-        ttk.Label(max_frame, text="Max albums (0 = all):").pack(side=tk.LEFT)
-        self.bulk_max_albums_var = tk.IntVar(value=0)
-        ttk.Entry(max_frame, textvariable=self.bulk_max_albums_var,
-                  width=6).pack(side=tk.LEFT, padx=(8, 0))
-
-    def _browse_bulk_output(self):
-        path = filedialog.askdirectory(title="Select output folder")
-        if path:
-            self.bulk_output_var.set(path)
-
     # -- Actions -------------------------------------------------------------
 
     def _start(self):
-        if self.mode_var.get() == "bulk":
-            self._start_bulk()
-            return
-
         folder = self.folder_var.get().strip()
         if not folder or not Path(folder).is_dir():
             messagebox.showerror("Error", "Please select a valid music folder.")
@@ -502,89 +422,6 @@ class App(tk.Tk):
             pass
 
     # -- Processing --------------------------------------------------------
-
-    def _start_bulk(self):
-        """Validate inputs and start bulk download in a background thread."""
-        artist_name = self.bulk_artist_var.get().strip()
-        if not artist_name:
-            messagebox.showerror("Error", "Please enter an artist name.")
-            return
-
-        output = self.bulk_output_var.get().strip()
-        if output and not Path(output).is_dir():
-            # Try to create it
-            try:
-                Path(output).mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                messagebox.showerror("Error", f"Cannot create output folder:\n{exc}")
-                return
-
-        self.running = False
-        self.update_idletasks()
-
-        self._run_counter += 1
-        self.running = True
-        self.start_btn.configure(state=tk.DISABLED)
-        self.stop_btn.configure(state=tk.NORMAL)
-        self.progress_var.set(0)
-        self.status_var.set("Bulk download...")
-        self._clear_log()
-
-        max_albums = 0
-        try:
-            max_albums = self.bulk_max_albums_var.get()
-        except (tk.TclError, ValueError):
-            max_albums = 0
-
-        thread = threading.Thread(
-            target=self._process_bulk,
-            args=(
-                artist_name,
-                Path(output) if output else None,
-                self.settings.source,
-                max_albums,
-                self.bulk_skip_var.get(),
-                self.bulk_artist_cover_var.get(),
-            ),
-            daemon=True,
-        )
-        thread.start()
-
-    def _process_bulk(self, artist_name, output_dir, source, max_albums,
-                      skip_existing, download_artist_cover):
-        """Background thread: run bulk download for one artist."""
-        run_id = self._run_counter
-
-        def log_fn(msg):
-            if not self.running or run_id != self._run_counter:
-                return
-            self.after(0, self._log, msg)
-
-        try:
-            stats = run_bulk_download(
-                artist_name,
-                output_dir,
-                source=source,
-                max_albums=max_albums,
-                download_artist_cover=download_artist_cover,
-                skip_existing=skip_existing,
-                log_fn=log_fn,
-            )
-
-            if run_id != self._run_counter:
-                return
-
-            self.after(0, self._log, f"\nResult: {stats.summary()}")
-            if stats.albums_found == 0:
-                self.after(0, self._log, "Artist not found on the selected source.", "warning")
-
-        except Exception as exc:
-            if run_id != self._run_counter:
-                return
-            self.after(0, self._log, f"Fatal error: {exc}", "error")
-        finally:
-            if run_id == self._run_counter:
-                self.after(0, lambda: self._set_finished(run_id))
 
     def _process(self, root: Path):
         self._log("Scanning folder for audio files...", "info")
