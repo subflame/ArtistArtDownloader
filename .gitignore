@@ -11,9 +11,10 @@ build/
 *.zip
 *.log
 
-# --- IDE ---
+# --- IDE / Agents ---
 .vscode/
 .idea/
+.opencode/
 *.swp
 *.swo
 
