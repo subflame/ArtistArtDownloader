@@ -27,12 +27,16 @@ DEEZER_ALBUM_SEARCH_URL = "https://api.deezer.com/search/album"
 DEEZER_TRACK_SEARCH_URL = "https://api.deezer.com/search/track"
 ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
 APPLE_MUSIC_BASE_URL = "https://music.apple.com/us/artist"
+MUSICBRAINZ_API_URL = "https://musicbrainz.org/ws/2"
+WIKIDATA_API_URL = "https://www.wikidata.org/wiki/Special:EntityData"
+WIKIMEDIA_COMMONS_URL = "https://commons.wikimedia.org/wiki/Special:FilePath"
 
 # Per-type timeouts
 TIMEOUT_SEARCH = 10
 TIMEOUT_DEEZER_DETAIL = 5
 TIMEOUT_APPLE_PAGE = 10
 TIMEOUT_DOWNLOAD = 30
+TIMEOUT_MUSICBRAINZ = 10
 
 # Search limits (named constants instead of magic numbers)
 _DEEZER_ARTIST_LIMIT = 10
@@ -47,6 +51,31 @@ _MAX_RETRIES = 3
 # Image processing limits
 _MAX_IMAGE_DIMENSION = 1500  # max width/height in px for downloaded images
 
+# Perceptual hash constants (dHash: 8x8 produces 64-bit hash)
+_HASH_SIZE = 8
+_PLACEHOLDER_MIN_BITS = 4  # minimum set bits in hash to consider non-uniform
+
+# Session-level hash tracker to detect duplicate images across artists
+# Maps hash_int -> artist_name for logging/reference
+_session_image_hashes: dict[int, str] = {}
+
+# Rating system weights for image selection
+_RATING_RESOLUTION_WEIGHT = 50.0   # max score for resolution
+_RATING_FORMAT_BONUS = 10.0        # PNG bonus
+_RATING_SOURCE_PRIORITY = {        # higher = more trusted source
+    "deezer_album": 30,
+    "itunes_album": 30,
+    "deezer_track": 25,
+    "itunes_track": 25,
+    "deezer_direct": 20,
+    "itunes_direct": 20,
+    "deezer_track_only": 15,
+    "itunes_track_only": 15,
+    "deezer_album_only": 15,
+    "itunes_album_only": 15,
+    "musicbrainz": 35,
+}
+
 # Common placeholder indicators in Deezer URLs
 DEEZER_PLACEHOLDER_PATTERNS = (
     "15627e72e2e2be8e5f4a5e5e5e5e5e5e",
@@ -56,6 +85,12 @@ DEEZER_PLACEHOLDER_PATTERNS = (
 
 # Reusable session with connection pooling
 _SESSION = requests.Session()
+_SESSION.mount("https://", requests.adapters.HTTPAdapter(
+    pool_connections=10, pool_maxsize=20, max_retries=0,
+))
+_SESSION.mount("http://", requests.adapters.HTTPAdapter(
+    pool_connections=10, pool_maxsize=20, max_retries=0,
+))
 atexit.register(_SESSION.close)
 
 # Rate limiting: track last request time per host
@@ -63,6 +98,13 @@ _last_request_time: dict[str, float] = {}
 _RATE_LIMIT_DELAY = 0.5  # seconds between requests to same host
 _RATE_LIMIT_COOLDOWN = 30  # seconds to wait after hitting a 429
 _last_429_time: dict[str, float] = {}  # host -> time of last 429
+
+# MusicBrainz requires 1 req/s, has its own rate limiter
+_MB_LAST_REQUEST_TIME: float = 0.0
+_MB_MIN_DELAY = 1.0  # seconds between requests to MusicBrainz API
+
+# User-Agent required by MusicBrainz (must contain contact info)
+_MB_USER_AGENT = "ArtistArtDownloader/1.0.2 (https://github.com/artist-art-downloader)"
 
 
 def _rate_limit(url: str):
@@ -91,6 +133,116 @@ def _is_deezer_placeholder(url: str) -> bool:
     """Check if a Deezer URL is a placeholder/default image."""
     url_lower = url.lower()
     return any(pattern in url_lower for pattern in DEEZER_PLACEHOLDER_PATTERNS)
+
+
+def _compute_dhash(data: bytes) -> int:
+    """Compute difference hash (dHash) of image data.
+
+    Returns a 64-bit integer hash. Similar images produce similar hashes
+    (low Hamming distance). Used to detect placeholder and duplicate images.
+
+    dHash algorithm:
+    1. Convert to grayscale
+    2. Resize to (HASH_SIZE+1) x HASH_SIZE (9x8)
+    3. Compare adjacent pixels per row: set bit if left > right
+    4. Return 64-bit hash
+
+    Returns 0 on any error (malformed data, etc.).
+    """
+    try:
+        img = _PIL_Image.open(io.BytesIO(data))
+        img = img.convert("L")  # grayscale
+        img = img.resize((_HASH_SIZE + 1, _HASH_SIZE), _PIL_Image.LANCZOS)
+        pixels = list(img.getdata())
+        hash_val = 0
+        bit = 0
+        for y in range(_HASH_SIZE):
+            row_start = y * (_HASH_SIZE + 1)
+            for x in range(_HASH_SIZE):
+                if pixels[row_start + x] > pixels[row_start + x + 1]:
+                    hash_val |= (1 << bit)
+                bit += 1
+        return hash_val
+    except Exception:
+        return 0
+
+
+def _hamming_distance(h1: int, h2: int) -> int:
+    """Compute Hamming distance between two perceptual hashes.
+
+    The number of differing bits in two 64-bit hashes.
+    Distance of 0 = identical images, > 20 = very different.
+    """
+    return (h1 ^ h2).bit_count()
+
+
+def _is_uniform_image(data: bytes, min_bits: int = _PLACEHOLDER_MIN_BITS) -> bool:
+    """Check if an image is too uniform (solid color / gradient placeholder).
+
+    Computes the dHash and checks if the number of set bits is below
+    a threshold. Very few set bits means most adjacent pixels are
+    equal, indicating a solid color or gradient image.
+
+    This catches Deezer-style placeholders, Apple Music og:image logos,
+    and other blank/default images that evade URL-based filtering.
+
+    Args:
+        data: Raw image bytes.
+        min_bits: Minimum number of set bits required. Lower = more strict.
+                  Default 4 catches most solid-color placeholders.
+
+    Returns:
+        True if the image appears to be a uniform placeholder.
+    """
+    h = _compute_dhash(data)
+    if h == 0:
+        return True  # completely uniform (all pixels identical)
+    return h.bit_count() < min_bits
+
+
+def _is_duplicate_image(data: bytes, artist_name: str) -> bool:
+    """Check if this image is a duplicate of one already downloaded this session.
+
+    Uses session-level hash tracking to detect when different artists get
+    the same image (e.g., a generic placeholder, or same album collage).
+
+    Args:
+        data: Raw image bytes.
+        artist_name: Name of the current artist (for logging context).
+
+    Returns:
+        True if an identical or near-identical image was already downloaded
+        for a *different* artist this session.
+    """
+    h = _compute_dhash(data)
+    if h == 0:
+        return False  # already caught by _is_uniform_image
+
+    for existing_hash, existing_name in _session_image_hashes.items():
+        if existing_name == artist_name:
+            continue  # same artist, expected match
+        distance = _hamming_distance(h, existing_hash)
+        if distance <= 2:
+            return True  # perceptually identical
+    return False
+
+
+def _track_image_hash(data: bytes, artist_name: str) -> None:
+    """Record image hash for session-level duplicate tracking.
+
+    Called after a successful download to remember this image's hash.
+    """
+    h = _compute_dhash(data)
+    if h:
+        _session_image_hashes[h] = artist_name
+
+
+def _reset_session_hashes() -> None:
+    """Clear the session-level hash tracker.
+
+    Called at the start of each new scan/download run.
+    """
+    _session_image_hashes.clear()
 
 
 def _request_with_retry(method: str, url: str, max_retries: int = 3,
@@ -125,6 +277,20 @@ def _request_with_retry(method: str, url: str, max_retries: int = 3,
                 return None
             # Non-retryable 4xx (400, 403, 404, etc.) — return immediately
             return resp
+        except requests.ConnectionError:
+            # Connection-level error (DNS, refused, reset) — retry
+            if attempt < max_retries - 1:
+                wait = (1 * (2 ** attempt)) + random.uniform(0, 0.5)
+                time.sleep(wait)
+                continue
+            return None
+        except requests.Timeout:
+            # Timeout — retry
+            if attempt < max_retries - 1:
+                wait = (1 * (2 ** attempt)) + random.uniform(0, 0.5)
+                time.sleep(wait)
+                continue
+            return None
         except requests.RequestException:
             if attempt < max_retries - 1:
                 wait = (1 * (2 ** attempt)) + random.uniform(0, 0.5)
@@ -146,8 +312,7 @@ def _find_artist_via_album(album_name: str, artist_name: str, year: str) -> Opti
     then retries WITH year if nothing found. Uses a larger result set (25) to
     handle slight formatting differences in album names.
 
-    Single-pass: collects exact and lenient (word-sharing) artist matches,
-    returns exact match first, falls back to lenient if no exact match.
+    Exact match only — no lenient/word-sharing fallback.
     """
     base = f"{album_name} {artist_name}"
     queries = expand_and_variants(base)
@@ -156,7 +321,6 @@ def _find_artist_via_album(album_name: str, artist_name: str, year: str) -> Opti
             if v not in queries:
                 queries.append(v)
 
-    lenient_id = None
     for query in queries:
         try:
             resp = _get(
@@ -171,27 +335,21 @@ def _find_artist_via_album(album_name: str, artist_name: str, year: str) -> Opti
                 rartist = r.get("artistName", "")
                 if not names_match_exact(rname, album_name):
                     continue
-                is_exact = names_match_exact(rartist, artist_name)
-                if is_exact:
+                if names_match_exact(rartist, artist_name):
                     return r.get("artistId")
-                # Collect lenient fallback
-                if lenient_id is None and _artist_names_share_word(rartist, artist_name):
-                    lenient_id = r.get("artistId")
         except (requests.RequestException, ValueError):
             pass
-    return lenient_id
+    return None
 
 
 def _find_artist_via_track(track_name: str, artist_name: str) -> Optional[int]:
     """Search iTunes by track+artist to find the correct artist ID.
 
-    Uses song entity search -- the results include artistId directly.
-    Single-pass: exact artist match first, lenient (word-sharing) as fallback.
+    Exact match only — no lenient/word-sharing fallback.
     """
     base = f"{track_name} {artist_name}"
     queries = expand_and_variants(base)
 
-    lenient_id = None
     for query in queries:
         try:
             resp = _get(
@@ -206,31 +364,24 @@ def _find_artist_via_track(track_name: str, artist_name: str) -> Optional[int]:
                 rartist = r.get("artistName", "")
                 if not names_match_exact(rtrack, track_name):
                     continue
-                is_exact = names_match_exact(rartist, artist_name)
-                if is_exact:
+                if names_match_exact(rartist, artist_name):
                     return r.get("artistId")
-                # Collect lenient fallback
-                if lenient_id is None and _artist_names_share_word(rartist, artist_name):
-                    lenient_id = r.get("artistId")
         except (requests.RequestException, ValueError):
             pass
-    return lenient_id
+    return None
 
 
-def _search_deezer_by_album(artist_name: str, album_name: str, year: str) -> Optional[str]:
+def _search_deezer_by_album(artist_name: str, album_name: str, year: str) -> tuple[Optional[str], Optional[int]]:
     """Deezer: find artist image via album search (most precise).
 
-    Single-pass: collects exact and lenient (word-sharing) artist matches,
-    returns exact match first, falls back to lenient if no exact match.
+    Returns (image_url, artist_id) on success, (None, None) on failure.
+    Exact match only — no lenient/word-sharing fallback.
     """
     album_queries = expand_and_variants(f"{album_name} {artist_name}")
     if year:
         for v in expand_and_variants(f"{album_name} {artist_name} {year}"):
             if v not in album_queries:
                 album_queries.append(v)
-
-    lenient_url = None
-    seen_ids: set[int] = set()
 
     for query in album_queries:
         resp = _get(DEEZER_ALBUM_SEARCH_URL, params={"q": query, "limit": _DEEZER_ALBUM_LIMIT},
@@ -245,43 +396,24 @@ def _search_deezer_by_album(artist_name: str, album_name: str, year: str) -> Opt
             artist_id = item_artist.get("id")
             if not artist_id:
                 continue
-
-            is_exact = names_match_exact(api_name, artist_name)
-
-            # Collect lenient fallback (no duplicates)
-            if not is_exact and artist_id not in seen_ids:
-                if _artist_names_share_word(api_name, artist_name):
-                    seen_ids.add(artist_id)
-                    if lenient_url is None:
-                        detail = _get(f"https://api.deezer.com/artist/{artist_id}",
-                                      timeout=TIMEOUT_DEEZER_DETAIL)
-                        if detail and detail.ok:
-                            url = detail.json().get("picture_xl") or detail.json().get("picture_big")
-                            if url and not _is_deezer_placeholder(url):
-                                lenient_url = url
-
-            if not is_exact:
+            if not names_match_exact(api_name, artist_name):
                 continue
             detail = _get(f"https://api.deezer.com/artist/{artist_id}",
                           timeout=TIMEOUT_DEEZER_DETAIL)
             if detail and detail.ok:
                 url = detail.json().get("picture_xl") or detail.json().get("picture_big")
                 if url and not _is_deezer_placeholder(url):
-                    return url
+                    return (url, artist_id)
 
-    return lenient_url
+    return (None, None)
 
 
 def _search_deezer_by_track(artist_name: str, track_name: str) -> Optional[str]:
     """Deezer: find artist image via track search.
 
-    Single-pass: collects exact and lenient (word-sharing) artist matches,
-    returns exact match first, falls back to lenient if no exact match.
+    Exact match only — no lenient/word-sharing fallback.
     """
     track_queries = expand_and_variants(f"{track_name} {artist_name}")
-
-    lenient_url = None
-    seen_ids: set[int] = set()
 
     for query in track_queries:
         resp = _get(DEEZER_TRACK_SEARCH_URL, params={"q": query, "limit": _DEEZER_TRACK_LIMIT},
@@ -296,22 +428,7 @@ def _search_deezer_by_track(artist_name: str, track_name: str) -> Optional[str]:
             artist_id = item_artist.get("id")
             if not artist_id:
                 continue
-
-            is_exact = names_match_exact(api_name, artist_name)
-
-            # Collect lenient fallback (no duplicates)
-            if not is_exact and artist_id not in seen_ids:
-                if _artist_names_share_word(api_name, artist_name):
-                    seen_ids.add(artist_id)
-                    if lenient_url is None:
-                        detail = _get(f"https://api.deezer.com/artist/{artist_id}",
-                                      timeout=TIMEOUT_DEEZER_DETAIL)
-                        if detail and detail.ok:
-                            url = detail.json().get("picture_xl") or detail.json().get("picture_big")
-                            if url and not _is_deezer_placeholder(url):
-                                lenient_url = url
-
-            if not is_exact:
+            if not names_match_exact(api_name, artist_name):
                 continue
             detail = _get(f"https://api.deezer.com/artist/{artist_id}",
                           timeout=TIMEOUT_DEEZER_DETAIL)
@@ -320,7 +437,7 @@ def _search_deezer_by_track(artist_name: str, track_name: str) -> Optional[str]:
                 if url and not _is_deezer_placeholder(url):
                     return url
 
-    return lenient_url
+    return None
 
 
 def _search_deezer_direct(artist_name: str, genres: set[str]) -> Optional[str]:
@@ -332,15 +449,9 @@ def _search_deezer_direct(artist_name: str, genres: set[str]) -> Optional[str]:
     - Local 'Roger Fakhr' vs streaming 'Roger Fakhr' (extra accent)
     - Local 'Hamid El Shaeri' vs streaming 'Hamid Al-Shaeri' (transliteration)
 
-    Two-pass strategy:
-    1. Exact match (names_match_exact) -- preferred
-    2. Lenient match (shares at least one word) -- fallback for transliteration diffs
+    Exact match only — no lenient/word-sharing fallback.
     """
-    # Use expand_and_variants for full bidirectional accent handling
     name_variants = expand_and_variants(artist_name)
-
-    lenient_fallback_url = None  # best word-sharing match
-    seen_lenient_ids: set[int] = set()
 
     for name_variant in name_variants:
         resp = _get(DEEZER_SEARCH_URL, params={"q": name_variant, "limit": _DEEZER_ARTIST_LIMIT},
@@ -353,17 +464,7 @@ def _search_deezer_direct(artist_name: str, genres: set[str]) -> Optional[str]:
             url = item.get("picture_xl") or item.get("picture_big")
             if not url or _is_deezer_placeholder(url):
                 continue
-
-            is_exact = names_match_exact(item_name, artist_name)
-
-            # Collect lenient fallback (word-sharing) if not exact
-            if not is_exact and item_id and item_id not in seen_lenient_ids:
-                if _artist_names_share_word(item_name, artist_name):
-                    seen_lenient_ids.add(item_id)
-                    if lenient_fallback_url is None:
-                        lenient_fallback_url = url
-
-            if not is_exact:
+            if not names_match_exact(item_name, artist_name):
                 continue
             if genres:
                 try:
@@ -385,13 +486,171 @@ def _search_deezer_direct(artist_name: str, genres: set[str]) -> Optional[str]:
                 # No genre filter -- accept first exact match
                 return url
 
-    # No exact match -- return lenient word-sharing fallback if available
-    return lenient_fallback_url
+    return None
+
+
+def _verify_by_album_tracks(artist_id: int, source: str,
+                             album_tracks: Optional[dict[str, set[str]]],
+                             searched_album: str = "") -> bool:
+    """Verify artist identity by comparing API track names with local tracks.
+
+    Fetches the artist's albums from the API, then for each album that
+    matches a local album name (via names_match_exact), fetches its tracks
+    and counts matches across all matched albums.
+
+    Additionally checks that the searched_album (if provided) actually
+    exists in the artist's API discography. If no local albums match
+    AND the searched album is not found in the API listing, the artist
+    is rejected (likely wrong match).
+
+    Threshold is adaptive:
+    - Singles/EPs (< 3 local tracks total across matched albums):
+      requires ALL local tracks to match API tracks.
+    - Full albums (3+ tracks): requires at least 3 matching tracks.
+
+    Uses min(len(local_tracks), len(api_tracks)) as the cap per album
+    to account for API response limits (not all tracks may be returned).
+
+    Returns True on any API error (don't reject artist on network issues)
+    or if album_tracks is empty/None (no data to verify).
+    """
+    if not album_tracks:
+        return True
+
+    total_matches = 0
+    total_possible = 0  # honest cap: min(local, api) per album
+    local_album_names = set(album_tracks.keys())
+    found_searched = not bool(searched_album)  # True if nothing to check
+
+    try:
+        if source == "deezer":
+            albums_resp = _get(
+                f"https://api.deezer.com/artist/{artist_id}/albums",
+                params={"limit": 50},
+                timeout=TIMEOUT_SEARCH,
+            )
+            if albums_resp is None or not albums_resp.ok:
+                return True
+
+            for album in albums_resp.json().get("data", []):
+                api_album_name = album.get("title", "")
+
+                # Check if searched album exists in API listing
+                if not found_searched and names_match_exact(api_album_name, searched_album):
+                    found_searched = True
+
+                local_tracks = _find_matching_album_tracks(
+                    api_album_name, album_tracks, local_album_names
+                )
+                if not local_tracks:
+                    continue
+
+                album_id = album.get("id")
+                if not album_id:
+                    continue
+
+                tracks_resp = _get(
+                    f"https://api.deezer.com/album/{album_id}/tracks",
+                    params={"limit": 50},
+                    timeout=TIMEOUT_SEARCH,
+                )
+                if tracks_resp is None or not tracks_resp.ok:
+                    continue
+
+                api_track_names = {
+                    t.get("title", "") for t in tracks_resp.json().get("data", [])
+                }
+                if not api_track_names:
+                    continue
+
+                matches = sum(
+                    1 for lt in local_tracks
+                    if any(names_match_exact(at, lt) for at in api_track_names)
+                )
+                total_matches += matches
+                total_possible += min(len(local_tracks), len(api_track_names))
+
+        else:  # apple_music
+            lookup_resp = _get(
+                "https://itunes.apple.com/lookup",
+                params={"id": artist_id, "entity": "album", "limit": 50},
+                timeout=TIMEOUT_SEARCH,
+            )
+            if lookup_resp is None or not lookup_resp.ok:
+                return True
+
+            for item in lookup_resp.json().get("results", []):
+                if item.get("wrapperType") != "collection":
+                    continue
+                api_album_name = item.get("collectionName", "")
+
+                # Check if searched album exists in API listing
+                if not found_searched and names_match_exact(api_album_name, searched_album):
+                    found_searched = True
+
+                local_tracks = _find_matching_album_tracks(
+                    api_album_name, album_tracks, local_album_names
+                )
+                if not local_tracks:
+                    continue
+
+                collection_id = item.get("collectionId")
+                if not collection_id:
+                    continue
+
+                tracks_resp = _get(
+                    "https://itunes.apple.com/lookup",
+                    params={"id": collection_id, "entity": "song", "limit": 50},
+                    timeout=TIMEOUT_SEARCH,
+                )
+                if tracks_resp is None or not tracks_resp.ok:
+                    continue
+
+                api_track_names = {
+                    t.get("trackName", "")
+                    for t in tracks_resp.json().get("results", [])
+                    if t.get("wrapperType") == "track"
+                }
+                if not api_track_names:
+                    continue
+
+                matches = sum(
+                    1 for lt in local_tracks
+                    if any(names_match_exact(at, lt) for at in api_track_names)
+                )
+                total_matches += matches
+                total_possible += min(len(local_tracks), len(api_track_names))
+
+    except (requests.RequestException, ValueError):
+        return True  # Don't reject on API errors
+
+    if total_possible == 0:
+        # No local albums matched the API listing.
+        # Reject only if searched_album is also not found — likely wrong artist.
+        return found_searched
+
+    # Adaptive threshold: singles/EPs (total < 3) require all to match,
+    # full albums require at least 3 matching tracks
+    threshold = min(3, total_possible)
+    return total_matches >= threshold
+
+
+def _find_matching_album_tracks(
+    api_album_name: str,
+    album_tracks: dict[str, set[str]],
+    local_album_names: set[str],
+) -> Optional[set[str]]:
+    """Find local track set for an API album name using exact name matching."""
+    for local_name in local_album_names:
+        if names_match_exact(api_album_name, local_name):
+            return album_tracks[local_name]
+    return None
 
 
 def fetch_artist_image_deezer(artist_name: str, album_name: str = "",
                               year: str = "", genres: Optional[set[str]] = None,
-                              track_name: str = "") -> Optional[str]:
+                              track_name: str = "",
+                              album_tracks: Optional[dict[str, set[str]]] = None) -> Optional[str]:
     """Search Deezer for artist image URL (picture_xl).
     Uses album+year context + genre filtering for precise matching.
     
@@ -405,9 +664,10 @@ def fetch_artist_image_deezer(artist_name: str, album_name: str = "",
     try:
         # Step 1: Try album+artist search
         if album_name:
-            result = _search_deezer_by_album(artist_name, album_name, year)
-            if result:
-                return result
+            url, api_artist_id = _search_deezer_by_album(artist_name, album_name, year)
+            if url and api_artist_id:
+                if not album_tracks or _verify_by_album_tracks(api_artist_id, "deezer", album_tracks, searched_album=album_name):
+                    return url
         # Step 2: Try track+artist search (even if album was provided but failed)
         if track_name:
             result = _search_deezer_by_track(artist_name, track_name)
@@ -421,11 +681,14 @@ def fetch_artist_image_deezer(artist_name: str, album_name: str = "",
 
 def fetch_artist_image_itunes(artist_name: str, album_name: str = "",
                               year: str = "", genres: Optional[set[str]] = None,
-                              track_name: str = "") -> Optional[str]:
+                              track_name: str = "",
+                              album_tracks: Optional[dict[str, set[str]]] = None) -> Optional[str]:
     """Search iTunes/Apple Music for artist image.
     
     Search order: album -> track -> name (most->least specific).
     Each level respects genre filtering as a soft preference.
+    After finding an artist via album search, verifies by comparing
+    API track listing against local album_tracks.
     """
     if genres is None:
         genres = set()
@@ -436,8 +699,9 @@ def fetch_artist_image_itunes(artist_name: str, album_name: str = "",
     if album_name:
         artist_id = _find_artist_via_album(album_name, artist_name, year)
         if artist_id:
-            rid = artist_id
-            slug = _slugify(artist_name)
+            if not album_tracks or _verify_by_album_tracks(artist_id, "apple_music", album_tracks, searched_album=album_name):
+                rid = artist_id
+                slug = _slugify(artist_name)
 
     # Strategy 2: find artist via track search
     if not rid and track_name:
@@ -446,14 +710,9 @@ def fetch_artist_image_itunes(artist_name: str, album_name: str = "",
             rid = artist_id
             slug = _slugify(artist_name)
 
-    # Strategy 3: direct artist search (with soft genre filter)
-    # Tries original name, accent-stripped, and accent-adding variants
+    # Strategy 3: direct artist search (exact match only)
     if not rid:
-        # Use expand_and_variants for full bidirectional accent handling
         search_terms = expand_and_variants(artist_name)
-
-        # Lenient fallback: if no exact match found, try word-sharing match
-        lenient_fallback = None  # (rid, slug) from best word-sharing result
 
         for term in search_terms:
             try:
@@ -465,38 +724,20 @@ def fetch_artist_image_itunes(artist_name: str, album_name: str = "",
                 if resp is None:
                     raise requests.RequestException("no response")
                 resp.raise_for_status()
-                first_valid = None
                 for r in resp.json().get("results", []):
                     rname = r.get("artistName", "")
-                    is_exact = names_match_exact(rname, artist_name)
-
-                    # Collect lenient fallback (word-sharing) if not exact
-                    if not is_exact and lenient_fallback is None:
-                        if _artist_names_share_word(rname, artist_name):
-                            lenient_fallback = (r.get("artistId"), _slugify(rname))
-
-                    if not is_exact:
+                    if not names_match_exact(rname, artist_name):
                         continue
-                    if first_valid is None:
-                        first_valid = r
                     api_genre = r.get("primaryGenreName", "")
                     if genres and api_genre and not genres_compatible(genres, api_genre):
-                        continue  # genre mismatch -- skip, try next
+                        continue
                     rid = r.get("artistId")
                     slug = _slugify(r.get("artistName", ""))
                     break
-                # Genre filter exhausted first pass -- accept first name match
-                if not rid and first_valid:
-                    rid = first_valid.get("artistId")
-                    slug = _slugify(first_valid.get("artistName", ""))
             except (requests.RequestException, ValueError):
                 pass
             if rid:
                 break
-
-        # No exact match -- try lenient word-sharing fallback
-        if not rid and lenient_fallback:
-            rid, slug = lenient_fallback
 
     if rid:
         return _fetch_og_image(rid, slug, artist_name)
@@ -695,14 +936,20 @@ def _save_as_png(data: bytes, save_path: Path) -> Optional[Path]:
 
 
 def download_image(url: str, save_path: Path, output_format: str = "jpeg",
-                   jpeg_quality: int = 85) -> tuple[Optional[Path], str]:
+                   jpeg_quality: int = 85,
+                   artist_name: str = "") -> tuple[Optional[Path], str]:
     """Download image from URL, optionally convert/resize, and save to file.
+
+    Validates image content using perceptual hashing to reject placeholder
+    and duplicate images before saving.
 
     Args:
         url: Image URL to download.
         save_path: Path to save to (extension is added automatically).
         output_format: 'jpeg' or 'png'.
         jpeg_quality: JPEG quality 1-100 (used when output_format='jpeg').
+        artist_name: Artist name for session-level duplicate tracking.
+                     If empty, duplicate check is skipped.
 
     Returns:
         Tuple of (actual_path or None, error_detail_string).
@@ -718,6 +965,7 @@ def download_image(url: str, save_path: Path, output_format: str = "jpeg",
             _rate_limit(url)
             try:
                 resp = requests.request("GET", url, timeout=TIMEOUT_DOWNLOAD,
+                                        stream=True,
                                         headers={"User-Agent": random.choice(_USER_AGENTS)})
                 break
             except requests.RequestException:
@@ -757,6 +1005,18 @@ def download_image(url: str, save_path: Path, output_format: str = "jpeg",
         # Reject non-image responses (HTML error pages, captchas, etc.)
         if img_format == "unknown":
             return None, "response is not a valid image"
+
+        # Perceptual hash check: reject uniform/placeholder images
+        if _is_uniform_image(data):
+            return None, "image appears to be a placeholder (uniform/solid content)"
+
+        # Check for session-level duplicates (different artist, same image)
+        if artist_name and _is_duplicate_image(data, artist_name):
+            return None, "image is a duplicate of another artist's image"
+
+        # Track this image's hash for future duplicate detection
+        if artist_name:
+            _track_image_hash(data, artist_name)
 
         # Try JPEG conversion first (handles all formats -> JPEG)
         if output_format == "jpeg":
@@ -917,14 +1177,11 @@ def search_artist_candidates(artist_name: str, source: str = "apple_music",
     """Search for artists matching the given name.
 
     Returns a list of candidates so the user can pick the right one.
-    Uses expand_and_variants() for full bidirectional accent handling.
-    Includes lenient (word-sharing) matches when no exact matches are found.
+    Exact match only — no lenient/word-sharing fallback.
     """
     candidates: list[ArtistCandidate] = []
-    lenient_candidates: list[ArtistCandidate] = []
     seen_ids: set[int] = set()
 
-    # Use expand_and_variants for full bidirectional accent handling
     search_terms = expand_and_variants(artist_name)
 
     try:
@@ -939,12 +1196,12 @@ def search_artist_candidates(artist_name: str, source: str = "apple_music",
                     continue
                 for item in resp.json().get("data", []):
                     api_name = item.get("name", "")
-                    is_exact = names_match_exact(api_name, artist_name)
                     artist_id = item.get("id")
                     if not artist_id or artist_id in seen_ids:
                         continue
+                    if not names_match_exact(api_name, artist_name):
+                        continue
                     seen_ids.add(artist_id)
-                    # Fetch genre from artist detail
                     genre = ""
                     try:
                         detail = _get(
@@ -966,10 +1223,7 @@ def search_artist_candidates(artist_name: str, source: str = "apple_music",
                         artist_id=artist_id, name=api_name,
                         genre=genre, source="deezer",
                     )
-                    if is_exact:
-                        candidates.append(candidate)
-                    elif _artist_names_share_word(api_name, artist_name):
-                        lenient_candidates.append(candidate)
+                    candidates.append(candidate)
                     if len(candidates) >= limit:
                         break
                 if len(candidates) >= limit:
@@ -985,29 +1239,23 @@ def search_artist_candidates(artist_name: str, source: str = "apple_music",
                     continue
                 for r in resp.json().get("results", []):
                     api_name = r.get("artistName", "")
-                    is_exact = names_match_exact(api_name, artist_name)
                     artist_id = r.get("artistId")
                     if not artist_id or artist_id in seen_ids:
+                        continue
+                    if not names_match_exact(api_name, artist_name):
                         continue
                     seen_ids.add(artist_id)
                     candidate = ArtistCandidate(
                         artist_id=artist_id, name=api_name,
                         genre=r.get("primaryGenreName", ""), source="apple_music",
                     )
-                    if is_exact:
-                        candidates.append(candidate)
-                    elif _artist_names_share_word(api_name, artist_name):
-                        lenient_candidates.append(candidate)
+                    candidates.append(candidate)
                     if len(candidates) >= limit:
                         break
                 if len(candidates) >= limit:
                     break
     except (requests.RequestException, ValueError):
         pass
-
-    # If no exact matches, include lenient (word-sharing) candidates
-    if not candidates and lenient_candidates:
-        candidates = lenient_candidates[:limit]
 
     return candidates
 
@@ -1051,7 +1299,8 @@ def fetch_candidate_preview(candidate: ArtistCandidate) -> Optional[bytes]:
 def fetch_artist_image(artist_name: str, source: str = "apple_music",
                        album_name: str = "", year: str = "",
                        genres: Optional[set[str]] = None,
-                       track_name: str = "") -> Optional[str]:
+                       track_name: str = "",
+                       album_tracks: Optional[dict[str, set[str]]] = None) -> Optional[str]:
     """Fetch artist image using the specified source only -- NO cross-source fallback.
 
     If the selected source doesn't have this artist, we return None so the
@@ -1062,6 +1311,7 @@ def fetch_artist_image(artist_name: str, source: str = "apple_music",
     - Album/year makes the search specific (like navigating from a track)
     - Track name provides fallback when album search fails
     - Genre filtering rejects wrong-artist matches (e.g. "Guf" rapper vs orchestra)
+    - album_tracks provides track-level verification after album match
 
     Args:
         artist_name: Name of the artist to search for.
@@ -1070,6 +1320,7 @@ def fetch_artist_image(artist_name: str, source: str = "apple_music",
         year: Release year for more precise matching.
         genres: Local genre tags for disambiguation (filters out wrong genres).
         track_name: Track name for track-level fallback search.
+        album_tracks: Dict of {album_name: set(track_names)} for verification.
 
     Returns:
         Image URL if found with exact match, None otherwise.
@@ -1077,9 +1328,9 @@ def fetch_artist_image(artist_name: str, source: str = "apple_music",
     if genres is None:
         genres = set()
     if source == "deezer":
-        return fetch_artist_image_deezer(artist_name, album_name, year, genres, track_name)
+        return fetch_artist_image_deezer(artist_name, album_name, year, genres, track_name, album_tracks)
     else:
-        return fetch_artist_image_itunes(artist_name, album_name, year, genres, track_name)
+        return fetch_artist_image_itunes(artist_name, album_name, year, genres, track_name, album_tracks)
 
 
 def _artist_names_share_word(name1: str, name2: str) -> bool:

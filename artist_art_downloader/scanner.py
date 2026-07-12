@@ -7,6 +7,7 @@ import time
 import hashlib
 import re
 import threading
+import unicodedata
 from functools import lru_cache
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -14,7 +15,7 @@ from typing import Optional
 
 from tinytag import TinyTag
 
-from .utils import sanitize_filename
+from .utils import sanitize_filename, transliterate_to_latin
 from .config import SCAN_CACHE_FILE
 
 SCAN_CACHE_VERSION = 1
@@ -37,11 +38,37 @@ COMPILATION_ALBUMARTISTS = {
 
 
 def _is_compilation(tag) -> bool:
-    """Check if the file belongs to a Various Artists compilation."""
+    """Check if the file belongs to a Various Artists compilation.
+
+    Returns True if albumartist matches any pattern:
+    - Exact match against COMPILATION_ALBUMARTISTS set (multilingual exact names)
+    - Starts with 'va' (case-insensitive, whole word or followed by punctuation)
+    - Contains 'various' as a whole word (case-insensitive)
+    """
     aa = tag.albumartist
     if not aa:
         return False
-    return aa.strip().lower() in COMPILATION_ALBUMARTISTS
+    aa_lower = aa.strip().lower()
+
+    # Exact match against known multilingual names
+    if aa_lower in COMPILATION_ALBUMARTISTS:
+        return True
+
+    # Starts with 'va' followed by a non-word char (boundary)
+    # Catches: 'VA - ...', 'VA Compilation', 'VA/', 'VA:', etc.
+    if re.match(r'^va\W', aa_lower):
+        return True
+
+    # Handles forms with dots/spaces: 'V.A.', 'v.a.', 'V A'
+    if re.match(r'^v[\.\s]a', aa_lower):
+        return True
+
+    # Contains 'various' as a whole word
+    # Catches: 'Various Artists', 'The Various', etc.
+    if re.search(r'\bvarious\b', aa_lower):
+        return True
+
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -125,14 +152,18 @@ def _build_artist_contexts(
 
         if is_comp:
             if artist not in artists:
-                continue
+                artists[artist] = ArtistContext()
             ctx = artists[artist]
             album_name = entry.get("tags", {}).get("album")
             if album_name:
                 ctx.albums.add(album_name)
+            title = entry.get("tags", {}).get("title")
+            if title:
+                ctx.track_names.add(title)
             genre = entry.get("tags", {}).get("genre")
             if genre:
                 ctx.genres.add(genre)
+            ctx.album_dirs.add(album_dir)
             continue
 
         if artist not in artists:
@@ -149,6 +180,8 @@ def _build_artist_contexts(
         if album_name:
             ctx.albums.add(album_name)
             ctx.album_track_counts[album_name] = ctx.album_track_counts.get(album_name, 0) + 1
+            if title:
+                ctx.album_tracks.setdefault(album_name, set()).add(title)
             if album_name not in ctx.album_years:
                 year = entry.get("tags", {}).get("year")
                 if year:
@@ -166,6 +199,7 @@ class ArtistContext:
     track_names: set[str] = field(default_factory=set)
     album_track_counts: dict[str, int] = field(default_factory=dict)
     album_years: dict[str, str] = field(default_factory=dict)
+    album_tracks: dict[str, set[str]] = field(default_factory=dict)
     # Fields derived from filesystem paths
     album_dirs: set[Path] = field(default_factory=set)
 
@@ -374,10 +408,14 @@ def _strip_collaboration_markers(artist: str) -> str:
       "Eminem feat. Dr. Dre"          -> "Eminem"
       "Artist Name (feat. Guest)"     -> "Artist Name"
     """
-    # Strip guest/producer/conjunction markers (feat, and, vs, with, etc.)
+    # Strip guest/producer markers (feat, vs, with, etc.)
+    # NOTE: 'and' is intentionally excluded — it appears in many legitimate
+    # band names (e.g. "Martha and the Vandellas", "And You Will Know Us...")
+    # and is NOT a reliable collaboration marker. Multi-artist splitting
+    # via 'and' is handled separately by split_artists().
     # \b ensures 'f' only matches as a standalone word, not as prefix of "F. Merzbow"
     artist = re.sub(
-        r'(?:^|[\s\(\[\{])(feat|ft|featuring|vs|with|w|presents?|prod|and)\b[\s\.:\(\[\{/].*$',
+        r'(?:^|[\s\(\[\{])(feat|ft|featuring|vs|with|w|presents?|prod)\b[\s\.:\(\[\{/].*$',
         '',
         artist,
         flags=re.IGNORECASE,
@@ -410,29 +448,23 @@ def _strip_collaboration_markers(artist: str) -> str:
 def split_artists(artist: str) -> list[str]:
     """Split a multi-artist tag string into individual artist names.
 
-    Handles:
-      "Eminem, Dr. Dre"              -> ["Eminem", "Dr. Dre"]
-      "Quasimoto & Madlib"           -> ["Quasimoto", "Madlib"]
-      "Artist1 and Artist2"          -> ["Artist1", "Artist2"]
-      "Eminem feat. Dr. Dre"         -> ["Eminem", "Dr. Dre"]
-      "Artist"                       -> ["Artist"]
+    Only splits on unambiguous separators.
+    Comma-splitting is NOT done here — it's already handled earlier
+    by _strip_collaboration_markers(), so doing it again would only
+    cause false positives on numbers (10,000 Days, 1,2,3,4).
+
+    &/and/et/etc. split is NOT used — too many false positives
+    with band names (Bruce Springsteen and The E Street Band,
+    Marie et les Garçons, M&M).
+
+    feat.:  "Eminem feat. Dr. Dre"   -> ["Eminem", "Dr. Dre"]
     """
-    # First try comma split (most common multi-artist delimiter)
-    if ',' in artist:
-        parts = [a.strip() for a in artist.split(',') if a.strip()]
+    # Try & split — only when surrounded by spaces to avoid
+    # "M&M" and HTML entities like "Lil&apos;"
+    if ' & ' in artist:
+        parts = [a.strip() for a in artist.split(' & ') if a.strip()]
         if len(parts) > 1:
             return parts
-
-    # Try & split
-    if '&' in artist:
-        parts = [a.strip() for a in artist.split('&') if a.strip()]
-        if len(parts) > 1:
-            return parts
-
-    # Try " and " split (case-insensitive, word boundary)
-    m = re.split(r'\s+(?:and|et|und|y|e)\s+', artist, flags=re.IGNORECASE)
-    if len(m) > 1:
-        return [a.strip() for a in m if a.strip()]
 
     # Try feat./ft. split
     m = re.split(r'\s+(?:feat\.?|ft\.?|featuring)\s+', artist, flags=re.IGNORECASE)
@@ -498,9 +530,13 @@ def _read_tags(file_path: Path) -> Optional[dict]:
 
     is_comp = _is_compilation(tag)
 
-    # Use albumartist first (main artist of the album), fall back to artist tag.
-    # The artist tag often contains featured guests like "Eminem (feat. Dr. Dre)"
-    # which would create unnecessary duplicates.
+    # Compilation (Various Artists) → skip entirely.
+    # Track artist names from compilations are unreliable — often embedded
+    # in brackets inside the track title, or from many different artists
+    # under one "Various" umbrella that we shouldn't process.
+    if is_comp:
+        return None
+
     artist = tag.albumartist
     if not artist:
         artist = tag.artist
@@ -647,8 +683,6 @@ _STOP_WORDS = frozenset({"the", "a", "an", "and", "&", "n", "n'"})
 def _normalize_name(name: str) -> str:
     """Lowercase, NFKD-decompose accents, transliterate non-Latin scripts,
     expand punctuation to spaces, strip non-alnum, collapse whitespace."""
-    import unicodedata
-    from .utils import transliterate_to_latin
     n = unicodedata.normalize("NFKD", name.lower())
     n = transliterate_to_latin(n)
     n = n.replace("/", " ").replace("-", " ").replace("&", " and ")
@@ -660,7 +694,6 @@ def _normalize_name(name: str) -> str:
 def _compact(name: str) -> str:
     """Strip ALL non-alphanumeric characters.  Catches pure-punctuation differences
     like 'AC/DC' vs 'ACDC', 'Jay-Z' vs 'Jay Z'."""
-    from .utils import transliterate_to_latin
     return re.sub(r"[^a-z0-9]", "", transliterate_to_latin(name.lower()))
 
 
@@ -832,6 +865,9 @@ def merge_artists(artists: dict[str, ArtistContext], merge_map: dict[str, str]) 
             merged_counts: dict[str, int] = {}
             for k in set(existing.album_track_counts) | set(ctx.album_track_counts):
                 merged_counts[k] = existing.album_track_counts.get(k, 0) + ctx.album_track_counts.get(k, 0)
+            merged_tracks: dict[str, set[str]] = {}
+            for k in set(existing.album_tracks) | set(ctx.album_tracks):
+                merged_tracks[k] = existing.album_tracks.get(k, set()) | ctx.album_tracks.get(k, set())
             result[name] = ArtistContext(
                 album_dirs=existing.album_dirs | ctx.album_dirs,
                 albums=existing.albums | ctx.albums,
@@ -839,6 +875,7 @@ def merge_artists(artists: dict[str, ArtistContext], merge_map: dict[str, str]) 
                 track_names=existing.track_names | ctx.track_names,
                 album_track_counts=merged_counts,
                 album_years={**existing.album_years, **ctx.album_years},
+                album_tracks=merged_tracks,
             )
         else:
             result[name] = ArtistContext(
@@ -848,6 +885,7 @@ def merge_artists(artists: dict[str, ArtistContext], merge_map: dict[str, str]) 
                 track_names=set(ctx.track_names),
                 album_track_counts=dict(ctx.album_track_counts),
                 album_years=dict(ctx.album_years),
+                album_tracks={k: set(v) for k, v in ctx.album_tracks.items()},
             )
 
     for name, ctx in artists.items():

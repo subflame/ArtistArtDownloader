@@ -17,10 +17,9 @@ import pystray
 from .config import Settings, THEMES, ArtistCache, CONFIG_DIR
 from .scanner import scan_folder, artist_image_exists, get_artist_root, find_similar_artists, merge_artists, split_artists
 from .utils import sanitize_filename
-from .fetcher import fetch_artist_image, download_image, search_artist_candidates, fetch_artist_image_by_id, fetch_candidate_preview, fetch_artist_image_by_track_only, fetch_artist_image_by_album_only
+from .fetcher import fetch_artist_image, download_image, search_artist_candidates, fetch_artist_image_by_id, fetch_candidate_preview, fetch_artist_image_by_track_only, fetch_artist_image_by_album_only, _reset_session_hashes
 from . import __version__ as APP_VERSION
 
-_SESSION_FILE = CONFIG_DIR / "session.json"
 _SESSION_FILE = CONFIG_DIR / "session.json"
 
 # Try to import tkinterdnd2 for drag-and-drop support
@@ -55,6 +54,7 @@ def _prompt_dialog(parent, dialog_class, *args):
     """Show a modal dialog from a background thread. Blocks until user responds.
 
     Returns the dialog's result attribute, or None if the dialog was closed.
+    Uses a longer timeout (2s) between polls to reduce CPU wakeups.
     """
     result = None
     event = threading.Event()
@@ -67,7 +67,7 @@ def _prompt_dialog(parent, dialog_class, *args):
         event.set()
 
     parent.after(0, show)
-    while not event.wait(timeout=0.5):
+    while not event.wait(timeout=2.0):
         if not parent.running:
             return None
     return result
@@ -777,6 +777,7 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
             "track_names": list(ctx.track_names),
             "album_track_counts": dict(ctx.album_track_counts),
             "album_years": dict(ctx.album_years),
+            "album_tracks": {k: list(v) for k, v in ctx.album_tracks.items()},
             "album_dirs": [str(p) for p in ctx.album_dirs],
         }
 
@@ -789,6 +790,7 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
             track_names=set(d.get("track_names", [])),
             album_track_counts=dict(d.get("album_track_counts", {})),
             album_years=dict(d.get("album_years", {})),
+            album_tracks={k: set(v) for k, v in d.get("album_tracks", {}).items()},
             album_dirs={Path(p) for p in d.get("album_dirs", [])},
         )
 
@@ -894,6 +896,7 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
         self.status_var.set("Resuming...")
         self.counter_var.set("")
         self._clear_log()
+        _reset_session_hashes()  # reset perceptual hash tracker
 
         thread = threading.Thread(
             target=self._process_resume,
@@ -1054,6 +1057,7 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
         self.status_var.set("Scanning...")
         self.counter_var.set("")
         self._clear_log()
+        _reset_session_hashes()  # reset perceptual hash tracker
         self._log(f"Artist Art Downloader v{APP_VERSION}", "info")
         self._log("", "")
 
@@ -1240,11 +1244,16 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
                         return None
             return None
 
-        # Step 0: Check cache
+        # Step 0: Check caches
         cached = self.cache.get(artist_name, source)
         if cached:
             self._log(f"     Cached URL -- using cached result", "skip")
             return cached, ""
+
+        # Step 0.5: Check negative cache (known no-image)
+        if self.cache.is_miss(artist_name, source):
+            self._log(f"     Previously searched -- no image found (cached)", "skip")
+            return None, "no image (cached)"
 
         tried = []
 
@@ -1263,7 +1272,8 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
                 "info",
             )
             img_url = _fetch_with_retry(fetch_artist_image, artist_name, source,
-                album_name=album_name, year=year_ctx, genres=ctx.genres)
+                album_name=album_name, year=year_ctx, genres=ctx.genres,
+                album_tracks=ctx.album_tracks)
             if img_url:
                 self.cache.put(artist_name, source, img_url)
                 return img_url, ""
@@ -1275,7 +1285,8 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
         for track_name in tracks_sample:
             self._log(f"  Trying track: {track_name}...", "info")
             img_url = _fetch_with_retry(fetch_artist_image, artist_name, source,
-                genres=ctx.genres, track_name=track_name)
+                genres=ctx.genres, track_name=track_name,
+                album_tracks=ctx.album_tracks)
             if img_url:
                 self.cache.put(artist_name, source, img_url)
                 return img_url, ""
@@ -1285,7 +1296,8 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
         # Step 3: Direct name search
         self._log(f"  Searching by name: {artist_name}...", "info")
         img_url = _fetch_with_retry(fetch_artist_image, artist_name, source,
-            album_name="", year="", genres=ctx.genres)
+            album_name="", year="", genres=ctx.genres,
+            album_tracks=ctx.album_tracks)
         if img_url:
             self.cache.put(artist_name, source, img_url)
             return img_url, ""
@@ -1326,6 +1338,66 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
                 time.sleep(0.5)
             tried.append("album_only")
 
+        # Step 3.7: Deezer fallback — if Apple Music failed, try Deezer
+        if source == "apple_music":
+            self._log(f"  Apple Music failed — falling back to Deezer...", "info")
+            fallback_source = "deezer"
+
+            # Retry album+year context
+            for album_name in albums_sorted:
+                year_ctx = ctx.album_years.get(album_name, "")
+                self._log(f"  [Deezer] Trying album: {album_name}...", "info")
+                img_url = _fetch_with_retry(fetch_artist_image, artist_name, fallback_source,
+                    album_name=album_name, year=year_ctx, genres=ctx.genres,
+                    album_tracks=ctx.album_tracks)
+                if img_url:
+                    self.cache.put(artist_name, source, img_url)
+                    return img_url, ""
+                time.sleep(0.5)
+
+            # Retry track+artist
+            for track_name in tracks_sample:
+                self._log(f"  [Deezer] Trying track: {track_name}...", "info")
+                img_url = _fetch_with_retry(fetch_artist_image, artist_name, fallback_source,
+                    genres=ctx.genres, track_name=track_name,
+                    album_tracks=ctx.album_tracks)
+                if img_url:
+                    self.cache.put(artist_name, source, img_url)
+                    return img_url, ""
+                time.sleep(0.5)
+
+            # Retry direct name search
+            self._log(f"  [Deezer] Searching by name: {artist_name}...", "info")
+            img_url = _fetch_with_retry(fetch_artist_image, artist_name, fallback_source,
+                album_name="", year="", genres=ctx.genres,
+                album_tracks=ctx.album_tracks)
+            if img_url:
+                self.cache.put(artist_name, source, img_url)
+                return img_url, ""
+            time.sleep(0.5)
+
+            # Retry track-only fallback
+            if tracks_all:
+                self._log(f"  [Deezer] Track-only fallback...", "info")
+                for track_name in tracks_sample:
+                    img_url = _fetch_with_retry(fetch_artist_image_by_track_only,
+                        track_name, artist_name, fallback_source, genres=ctx.genres)
+                    if img_url:
+                        self.cache.put(artist_name, source, img_url)
+                        return img_url, ""
+                    time.sleep(0.5)
+
+            # Retry album-only fallback
+            if albums_all:
+                self._log(f"  [Deezer] Album-only fallback...", "info")
+                for album_name in albums_all:
+                    img_url = _fetch_with_retry(fetch_artist_image_by_album_only,
+                        album_name, artist_name, fallback_source, genres=ctx.genres)
+                    if img_url:
+                        self.cache.put(artist_name, source, img_url)
+                        return img_url, ""
+                    time.sleep(0.5)
+
         # Step 4: Candidate picker — absolute last resort
         candidates = search_artist_candidates(artist_name, source)
         if len(candidates) == 1:
@@ -1346,6 +1418,8 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
                 return None, "no image for chosen candidate"
             return None, "skipped candidate selection"
 
+        # Cache the miss — none of the strategies found anything
+        self.cache.put_miss(artist_name, source)
         detail = "tried: " + ", ".join(tried) if tried else "no results from any search"
         return None, detail
 
@@ -1393,7 +1467,8 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
             _download_delay = time.time()
             result, dl_err = download_image(url, path,
                                       output_format=self.settings.output_format,
-                                      jpeg_quality=self.settings.jpeg_quality)
+                                      jpeg_quality=self.settings.jpeg_quality,
+                                      artist_name=name)
             return name, result, url, dl_err or ""
 
         with ThreadPoolExecutor(max_workers=4) as pool:

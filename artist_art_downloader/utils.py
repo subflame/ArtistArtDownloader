@@ -78,8 +78,8 @@ def normalize_name(name: str) -> str:
 # Suffix patterns to strip for lenient name comparison.
 # Applied in order; first match wins.
 _SUFFIX_PATTERNS = [
-    re.compile(r"\s*\(.*\)\s*$"),          # (Remastered), (Deluxe Edition)
-    re.compile(r"\s*\[.*\]\s*$"),          # [Deluxe], [Remastered 2024]
+    re.compile(r"\s*\([^)]*\)\s*$"),         # (Remastered), (Deluxe Edition)
+    re.compile(r"\s*\[[^\]]*\]\s*$"),         # [Deluxe], [Remastered 2024]
     re.compile(r"\s+(?:feat|ft)\.\s.*$", re.I),  # feat. Someone, ft. Guest
     re.compile(r"\s+featuring\s.*$", re.I),    # featuring Someone
     re.compile(r"\s*[\-\u2013\u2014]\s*(?:remaster(?:ed)?|deluxe|explicit|clean|radio\s*edit|extended|bonus\s*track|remix|acoustic|live|instrumental|special\s*edition|anniversary\s*edition|expanded)\b.*$", re.I),

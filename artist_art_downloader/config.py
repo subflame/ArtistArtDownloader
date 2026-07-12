@@ -232,6 +232,30 @@ class ArtistCache:
         with self._lock:
             self._data[key] = {"url": img_url, "ts": time.time()}
 
+    def is_miss(self, artist_name: str, source: str) -> bool:
+        """Check if this artist+source was previously cached as having no image.
+
+        'Miss' means we already searched all strategies for this artist+source
+        and found nothing. This avoids re-scanning the same artist every run.
+
+        Returns True if a miss is cached AND the source matches.
+        """
+        key = f"{artist_name}|{source}"
+        with self._lock:
+            entry = self._data.get(key)
+        if not entry:
+            return False
+        return entry.get("miss", False)
+
+    def put_miss(self, artist_name: str, source: str) -> None:
+        """Cache that this artist+source has no image available.
+
+        Stores a negative result so future lookups skip the search entirely.
+        """
+        key = f"{artist_name}|{source}"
+        with self._lock:
+            self._data[key] = {"miss": True, "ts": time.time()}
+
     def invalidate(self, artist_name: str, source: str) -> None:
         """Remove a cached entry for a specific artist+source."""
         key = f"{artist_name}|{source}"
