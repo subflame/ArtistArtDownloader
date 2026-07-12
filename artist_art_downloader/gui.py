@@ -14,12 +14,14 @@ from pathlib import Path
 from typing import Optional
 import pystray
 
-from .config import Settings, THEMES, ArtistCache
+from .config import Settings, THEMES, ArtistCache, CONFIG_DIR
 from .scanner import scan_folder, artist_image_exists, get_artist_root, find_similar_artists, merge_artists, split_artists
 from .utils import sanitize_filename
 from .fetcher import fetch_artist_image, download_image, search_artist_candidates, fetch_artist_image_by_id, fetch_candidate_preview, fetch_artist_image_by_track_only, fetch_artist_image_by_album_only
+from . import __version__ as APP_VERSION
 
-APP_VERSION = "1.0.2"
+_SESSION_FILE = CONFIG_DIR / "session.json"
+_SESSION_FILE = CONFIG_DIR / "session.json"
 
 # Try to import tkinterdnd2 for drag-and-drop support
 try:
@@ -54,18 +56,21 @@ def _prompt_dialog(parent, dialog_class, *args):
 
     Returns the dialog's result attribute, or None if the dialog was closed.
     """
-    result_holder = [None]
+    result = None
     event = threading.Event()
 
     def show():
+        nonlocal result
         dlg = dialog_class(parent, *args)
         parent.wait_window(dlg)
-        result_holder[0] = getattr(parent, '_dialog_result', None)
+        result = getattr(dlg, '_dialog_result', None)
         event.set()
 
     parent.after(0, show)
-    event.wait()
-    return result_holder[0]
+    while not event.wait(timeout=0.5):
+        if not parent.running:
+            return None
+    return result
 
 
 class App(tk.Tk if not HAS_DND else tkdnd.Tk):
@@ -74,15 +79,27 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
         self.settings = Settings.load()
         self.cache = ArtistCache()
         self.running = False
+        self._paused = False
+        self._pause_event = threading.Event()
+        self._pause_event.set()
         self._run_counter = 0
         self.results: list[tuple[str, str, str]] = []
         self._failed_items: list[tuple[str, str, Path, str]] = []
         self._retry_names: set[str] = set()
+        self._session_work_items: list = []
+        self._session_search_results: list = []
+        self._session_downloaded = 0
+        self._session_skipped = 0
+        self._session_failed = 0
+        self._session_phase = 1  # 1=searching, 2=downloading
 
         self.title(f"Artist Art Downloader v{APP_VERSION}")
         geo = f"{self.settings.window_width}x{self.settings.window_height}"
         if self.settings.window_x >= 0 and self.settings.window_y >= 0:
-            geo += f"+{self.settings.window_x}+{self.settings.window_y}"
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            if self.settings.window_x < sw and self.settings.window_y < sh:
+                geo += f"+{self.settings.window_x}+{self.settings.window_y}"
         self.geometry(geo)
         self.minsize(600, 500)
 
@@ -120,10 +137,12 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
         self.after(50, self._check_minimize_poll)
 
         # Hotkeys
-        self.bind("<Return>", lambda e: self._start())
+        self.bind("<Return>", lambda e: self._resume() if self._paused else self._start())
         self.bind("<Escape>", lambda e: self._stop())
         self.bind("<Control-o>", lambda e: self._browse_folder())
-        self.bind("<Control-l>", lambda e: self._clear_log())
+
+        # Check for saved session to resume
+        self.after(100, self._check_resume_session)
 
     # -- Theming -----------------------------------------------------------
 
@@ -199,7 +218,9 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
                          insertcolor=t["fg"], padding=6)
 
         style.configure("Horizontal.TProgressbar",
-                         background=t["accent"], troughcolor=t["bg_secondary"])
+                         background=t["fg_dim"], troughcolor=t["bg"])
+        style.configure("Horizontal.TScale",
+                         background=t["fg_dim"], troughcolor=t["bg"])
 
         style.configure("Log.TFrame", background=t["list_bg"])
         style.configure("Log.TLabel", background=t["list_bg"], foreground=t["fg"],
@@ -275,8 +296,12 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
         self.start_btn.pack(side=tk.LEFT, padx=(0, 8))
 
         self.stop_btn = ttk.Button(btn_frame, text="Stop", style="Stop.TButton",
-                                    command=self._stop, state=tk.DISABLED)
+                                     command=self._stop, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT)
+
+        self.pause_btn = ttk.Button(btn_frame, text="Pause", style="Small.TButton",
+                                     command=self._toggle_pause, state=tk.DISABLED)
+        self.pause_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         self.retry_btn = ttk.Button(btn_frame, text="Retry Failed", style="Small.TButton",
                                      command=self._retry_failed, state=tk.DISABLED)
@@ -284,11 +309,7 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
 
         self.export_btn = ttk.Button(btn_frame, text="Export Log", style="Small.TButton",
                                       command=self._export_log)
-        self.export_btn.pack(side=tk.RIGHT, padx=(0, 4))
-
-        self.clear_btn = ttk.Button(btn_frame, text="Clear Log", style="Small.TButton",
-                                     command=self._clear_log)
-        self.clear_btn.pack(side=tk.RIGHT)
+        self.export_btn.pack(side=tk.RIGHT)
 
         # -- Progress --
         self.progress_var = tk.DoubleVar(value=0)
@@ -428,10 +449,13 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
 
     def _log(self, text: str, tag: str = ""):
         """Thread-safe log: if called from bg thread, schedule via after()."""
+        import datetime
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        line = f"[{ts}] {text}"
         if threading.current_thread() is threading.main_thread():
             self._ensure_log_active()
             self.log_text.configure(state=tk.NORMAL)
-            self.log_text.insert(tk.END, text + "\n", tag)
+            self.log_text.insert(tk.END, line + "\n", tag)
             self.log_text.see(tk.END)
             self.log_text.configure(state=tk.DISABLED)
         else:
@@ -449,33 +473,41 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
                                      font=("Segoe UI", 10, "italic"))
 
     def _clear_log(self):
-        if self.running:
-            return
-        if (getattr(self, '_log_visible', True)
-                and not messagebox.askyesno("Clear Log", "This will erase all log entries. Continue?")):
-            return
         self.log_text.configure(state=tk.NORMAL)
         self.log_text.delete("1.0", tk.END)
-        self.log_text.insert("1.0", _LOG_PLACEHOLDER, "placeholder")
         self.log_text.configure(state=tk.DISABLED)
         self._log_visible = False
 
-    def _export_log(self):
-        if self.running:
-            return
-        path = filedialog.asksaveasfilename(
-            defaultextension=".txt",
-            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
-            title="Export Log",
-        )
+    def _export_log(self, path: str = ""):
         if not path:
-            return
+            if self.running:
+                return
+            path = filedialog.asksaveasfilename(
+                defaultextension=".txt",
+                filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+                title="Export Log",
+            )
+            if not path:
+                return
         try:
             text = self.log_text.get("1.0", tk.END)
             Path(path).write_text(text, encoding="utf-8")
-            self._log(f"Log saved to: {path}", "success")
+            if not self.running:
+                self._log(f"Log saved to: {path}", "success")
         except Exception as e:
             self._log(f"Failed to save log: {e}", "error")
+
+    def _auto_export_log(self):
+        """Auto-export log next to the executable on errors."""
+        from datetime import datetime
+        exe_dir = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path.cwd()
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        path = exe_dir / f"ArtistArtDownloader_{ts}.log"
+        try:
+            text = self.log_text.get("1.0", tk.END)
+            path.write_text(text, encoding="utf-8")
+        except Exception:
+            pass
 
     def _show_log_menu(self, event):
         self._log_menu.event_x = event.x
@@ -663,6 +695,8 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
         self.focus_force()
 
     def _quit_from_tray(self):
+        if self.running:
+            self._save_session()
         self.running = False
         if self._tray_icon:
             try:
@@ -675,6 +709,10 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
         self.destroy()
 
     def _stop(self):
+        self._paused = False
+        self._pause_event.set()
+        if self.running:
+            self._save_session()
         self.running = False
         self.status_var.set("Stopping...")
 
@@ -696,6 +734,282 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
         except Exception:
             pass
 
+    # -- Pause / Resume ----------------------------------------------------
+
+    def _toggle_pause(self):
+        if self._paused:
+            self._resume()
+        else:
+            self._pause()
+
+    def _pause(self):
+        self._paused = True
+        self._pause_event.clear()
+        self.pause_btn.configure(text="Resume")
+        self.status_var.set("Paused")
+        self._log("Paused.", "warning")
+        self._save_session()
+
+    def _resume(self):
+        self._paused = False
+        self._pause_event.set()
+        self.pause_btn.configure(text="Pause")
+        self.status_var.set("Resumed")
+        self.after(0, self._update_tray_tooltip, "Resumed")
+        self._log("Resumed.", "info")
+        self._clear_session()
+
+    def _check_pause(self):
+        """Block if paused; return False if stopped while waiting."""
+        if self._paused and self.running:
+            self.after(0, self._update_tray_tooltip, "Paused")
+        while self._paused and self.running:
+            self._pause_event.wait(timeout=0.5)
+        return self.running
+
+    # -- Session persistence (resume after restart) ------------------------
+
+    @staticmethod
+    def _serialize_context(ctx) -> dict:
+        return {
+            "albums": list(ctx.albums),
+            "genres": list(ctx.genres),
+            "track_names": list(ctx.track_names),
+            "album_track_counts": dict(ctx.album_track_counts),
+            "album_years": dict(ctx.album_years),
+            "album_dirs": [str(p) for p in ctx.album_dirs],
+        }
+
+    @staticmethod
+    def _deserialize_context(d: dict):
+        from .scanner import ArtistContext
+        return ArtistContext(
+            albums=set(d.get("albums", [])),
+            genres=set(d.get("genres", [])),
+            track_names=set(d.get("track_names", [])),
+            album_track_counts=dict(d.get("album_track_counts", {})),
+            album_years=dict(d.get("album_years", {})),
+            album_dirs={Path(p) for p in d.get("album_dirs", [])},
+        )
+
+    def _save_session(self):
+        """Save current processing state so it can be resumed after restart."""
+        import json
+        try:
+            completed = []
+            remaining_names = []
+            remaining_contexts = {}
+            # Atomic snapshot to avoid race with worker thread
+            snapshot_results = list(self._session_search_results)
+            snapshot_work = list(self._session_work_items)
+            for item in snapshot_results:
+                name, url, save_path, err = item
+                completed.append([name, url or "", str(save_path), err or ""])
+            processed_names = {item[0] for item in snapshot_results}
+            for item in snapshot_work:
+                name = item[0]
+                if name not in processed_names:
+                    remaining_names.append(name)
+                    remaining_contexts[name] = self._serialize_context(item[1])
+
+            state = {
+                "folder": self.folder_var.get(),
+                "source": self.settings.source,
+                "skip_existing": self.skip_var.get(),
+                "phase": self._session_phase,
+                "completed_searches": completed,
+                "remaining_artists": remaining_names,
+                "remaining_contexts": remaining_contexts,
+                "downloaded": self._session_downloaded,
+                "skipped": self._session_skipped,
+                "failed": self._session_failed,
+            }
+            _SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _SESSION_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _clear_session(self):
+        """Delete saved session file (processing completed or cancelled)."""
+        try:
+            if _SESSION_FILE.exists():
+                _SESSION_FILE.unlink()
+        except Exception:
+            pass
+
+    def _check_resume_session(self):
+        """On startup, prompt to resume a previous interrupted session."""
+        import json
+        if not _SESSION_FILE.exists():
+            return
+        try:
+            state = json.loads(_SESSION_FILE.read_text(encoding="utf-8"))
+            folder = state.get("folder", "")
+            if not folder or not Path(folder).is_dir():
+                self._clear_session()
+                return
+            choice = messagebox.askyesnocancel(
+                "Resume Session",
+                f"An interrupted session was found for folder:\n{folder}\n\n"
+                "Do you want to resume where you left off?\n\n"
+                "Yes = Resume   No = Start fresh   Cancel = Exit",
+            )
+            if choice is None:
+                self.quit()
+                return
+            if not choice:
+                self._clear_session()
+                return
+            # Resume
+            self.folder_var.set(folder)
+            self.skip_var.set(state.get("skip_existing", False))
+            if state.get("source"):
+                self.settings.source = state["source"]
+            self._start_resume(state)
+        except Exception:
+            self._clear_session()
+
+    def _start_resume(self, state: dict):
+        """Continue processing from saved session state."""
+        if self.running:
+            return
+        folder = state["folder"]
+        if not Path(folder).is_dir():
+            messagebox.showerror("Error", "The folder no longer exists.")
+            self._clear_session()
+            return
+
+        self._run_counter += 1
+        self.running = True
+        self._paused = False
+        self._pause_event.set()
+        self.start_btn.configure(state=tk.DISABLED)
+        self.stop_btn.configure(state=tk.NORMAL)
+        self.pause_btn.configure(state=tk.NORMAL, text="Pause")
+        self.retry_btn.configure(state=tk.DISABLED)
+        self._failed_items.clear()
+        self._retry_names.clear()
+        self.progress_var.set(0)
+        self.phase_var.set("")
+        self.status_var.set("Resuming...")
+        self.counter_var.set("")
+        self._clear_log()
+
+        thread = threading.Thread(
+            target=self._process_resume,
+            args=(Path(folder), state),
+            daemon=True,
+        )
+        thread.start()
+
+    def _process_resume(self, root: Path, state: dict):
+        """Resume processing from saved state (no re-scan)."""
+        from .scanner import artist_image_exists, get_artist_root, scan_folder, merge_artists
+
+        self.after(0, self._update_tray_tooltip, "Resuming...")
+        self._log("Resuming previous session...", "info")
+
+        completed_searches = state.get("completed_searches", [])
+        completed_names = {item[0] for item in completed_searches}
+        remaining_contexts = state.get("remaining_contexts", {})
+        downloaded = state.get("downloaded", 0)
+        skipped = state.get("skipped", 0)
+        failed = state.get("failed", 0)
+
+        # If no saved contexts (old session format), fall back to re-scan
+        if not remaining_contexts:
+            self._log("No saved contexts found, re-scanning folder...", "info")
+            try:
+                from .scanner import scan_folder, merge_artists
+                raw_artists = scan_folder(root, skip_existing=state.get("skip_existing", False),
+                                          separate_folder=self.settings.separate_folder,
+                                          progress_cb=_on_scan_progress)
+                if self.settings.artist_aliases:
+                    raw_artists = merge_artists(raw_artists, self.settings.artist_aliases)
+            except Exception as e:
+                self._log(f"Scan error: {e}", "error")
+                self._finish()
+                return
+        else:
+            raw_artists = None
+
+        # Build work list from saved contexts (no re-scan)
+        work_items = []
+        for artist_name in state.get("remaining_artists", []):
+            if raw_artists is not None:
+                ctx = raw_artists.get(artist_name)
+                if not ctx:
+                    self._log(f"  [X] {artist_name} -- not found in re-scan", "error")
+                    failed += 1
+                    continue
+            else:
+                ctx_data = remaining_contexts.get(artist_name)
+                if not ctx_data:
+                    self._log(f"  [X] {artist_name} -- no saved context", "error")
+                    failed += 1
+                    continue
+                ctx = self._deserialize_context(ctx_data)
+            if not ctx.album_dirs:
+                self._log(f"  [X] {artist_name} -- no album directories", "error")
+                failed += 1
+                continue
+            album_dir = next(iter(ctx.album_dirs))
+            artist_root = get_artist_root(album_dir, root)
+            if (state.get("skip_existing", False)
+                    and artist_image_exists(album_dir, root, artist_name,
+                                            separate_folder=self.settings.separate_folder)):
+                self._log(f"  [>>] {artist_name} -- image exists", "skip")
+                skipped += 1
+                continue
+            work_items.append((artist_name, ctx, artist_root))
+
+        self._log(f"Resuming: {len(work_items)} remaining, {len(completed_searches)} already searched.", "info")
+
+        # Update session state for subsequent pause/save
+        self._session_work_items = list(work_items)
+        self._session_search_results = list(completed_searches)
+        self._session_downloaded = downloaded
+        self._session_skipped = skipped
+        self._session_failed = failed
+
+        # Phase 1: search remaining artists
+        source = state.get("source", self.settings.source)
+        search_results = list(completed_searches)
+
+        if work_items:
+            self.after(0, self.phase_var.set, "Phase 1/2: Searching remaining...")
+            total_work = len(search_results) + len(work_items)
+            for i, (artist_name, ctx, artist_root) in enumerate(work_items, 1):
+                if not self.running:
+                    self._log("Stopped by user.", "warning")
+                    break
+                idx = len(search_results) + i
+                self.after(0, self.status_var.set, f"[{idx}/{total_work}] Searching: {artist_name}")
+                self.after(0, self.progress_var.set, (idx / total_work) * 50)
+                self.after(0, self._update_tray_tooltip, f"Searching {idx}/{total_work}")
+
+                safe_name = sanitize_filename(artist_name)
+                if self.settings.separate_folder:
+                    save_dir = Path(self.settings.separate_folder)
+                    save_dir.mkdir(parents=True, exist_ok=True)
+                    save_path = save_dir / safe_name
+                else:
+                    base_name = safe_name if self.settings.artist_filename else "artist"
+                    save_path = artist_root / base_name
+
+                self._log(f"  {artist_name}", "info")
+                self._log(f"     Save to: {save_path}.jpg/.png", "info")
+                img_url, error_detail = self._search_artist_image(artist_name, ctx, source)
+                if img_url:
+                    self._log(f"     [ok] URL found", "success")
+                else:
+                    self._log(f"     [X] {error_detail}", "error")
+                search_results.append((artist_name, img_url, save_path, error_detail))
+                self._session_search_results.append((artist_name, img_url, save_path, error_detail))
+
+        # Phase 2: download
+        self._do_download_phase(search_results, downloaded, skipped, failed)
+
     # -- Retry Failed ------------------------------------------------------
 
     def _retry_failed(self):
@@ -713,6 +1027,10 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
     # -- Processing --------------------------------------------------------
 
     def _start(self):
+        if self.running:
+            if self._paused:
+                self._resume()
+            return
         folder = self.folder_var.get().strip()
         if not folder or not Path(folder).is_dir():
             messagebox.showerror("Error", "Please select a valid music folder.")
@@ -723,15 +1041,21 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
 
         self._run_counter += 1
         self.running = True
+        self._paused = False
+        self._pause_event.set()
         self.start_btn.configure(state=tk.DISABLED)
         self.stop_btn.configure(state=tk.NORMAL)
+        self.pause_btn.configure(state=tk.NORMAL, text="Pause")
         self.retry_btn.configure(state=tk.DISABLED)
         self._failed_items.clear()
+        self._retry_names.clear()
         self.progress_var.set(0)
         self.phase_var.set("")
         self.status_var.set("Scanning...")
         self.counter_var.set("")
         self._clear_log()
+        self._log(f"Artist Art Downloader v{APP_VERSION}", "info")
+        self._log("", "")
 
         self._add_recent_folder(folder)
         self.settings.last_folder = folder
@@ -746,9 +1070,15 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
 
         skip_existing = self.skip_var.get()
         sep_folder = self.settings.separate_folder
+        scan_count = 0
+        def _on_scan_progress():
+            nonlocal scan_count
+            scan_count += 1
+            self.after(0, self.status_var.set, f"Scanning... ({scan_count} files)")
         try:
             raw_artists = scan_folder(root, skip_existing=skip_existing,
-                                      separate_folder=sep_folder)
+                                      separate_folder=sep_folder,
+                                      progress_cb=_on_scan_progress)
         except Exception as e:
             self._log(f"Scan error: {e}", "error")
             self._finish()
@@ -806,30 +1136,34 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
         skipped = 0
         failed = 0
 
-        # Collect work items
+        # Collect work items — resolve multi-artist names before any search
         work_items = []
         for artist_name, ctx in artists.items():
-            alternatives = split_artists(artist_name)
-            if len(alternatives) > 1:
-                self._log(f"  Multiple artists found: {artist_name}", "info")
-                chosen = self._prompt_multi_artist(artist_name, alternatives)
-                if not chosen:
-                    self._log(f"  [skip] {artist_name} -- user skipped", "skip")
-                    continue
-                artist_name = chosen
-                self._log(f"  Selected: {artist_name}", "success")
-
             if not ctx.album_dirs:
                 self._log(f"  [X] {artist_name} -- no album directories", "error")
                 failed += 1
                 continue
             album_dir = next(iter(ctx.album_dirs))
             artist_root = get_artist_root(album_dir, root)
+            # Skip existing images before any interactive dialogs
             if skip_existing and artist_image_exists(album_dir, root, artist_name,
-                                                      separate_folder=sep_folder):
+                                                       separate_folder=sep_folder):
                 self._log(f"  [>>] {artist_name} -- image exists", "skip")
                 skipped += 1
                 continue
+
+            # Resolve multi-artist names before search phase
+            alternatives = split_artists(artist_name)
+            if len(alternatives) > 1:
+                self._log(f"  Multiple artists detected: {artist_name}", "info")
+                chosen = self._prompt_multi_artist(artist_name, alternatives)
+                if not chosen:
+                    self._log(f"  [>>] {artist_name} -- skipped by user", "skip")
+                    skipped += 1
+                    continue
+                self._log(f"  Selected: {chosen}", "success")
+                artist_name = chosen
+
             work_items.append((artist_name, ctx, artist_root))
 
         total = len(work_items)
@@ -840,12 +1174,20 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
 
         self._log(f"Searching {total} artist(s)...\n", "info")
 
+        # Store session state for pause/resume
+        self._session_work_items = list(work_items)
+        self._session_search_results = []
+        self._session_downloaded = downloaded
+        self._session_skipped = skipped
+        self._session_failed = failed
+
         # Phase 1: Search
         self.after(0, self.phase_var.set, "Phase 1/2: Searching...")
-        search_results = []
         for i, (artist_name, ctx, artist_root) in enumerate(work_items, 1):
             if not self.running:
                 self._log("Stopped by user.", "warning")
+                break
+            if not self._check_pause():
                 break
             self.after(0, self.status_var.set, f"[{i}/{total}] Searching: {artist_name}")
             self.after(0, self.progress_var.set, (i / total) * 50)
@@ -862,24 +1204,193 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
 
             self._log(f"  {artist_name}", "info")
             self._log(f"     Save to: {save_path}.jpg/.png", "info")
+            # Check pause before each API call (in case paused while idle)
+            if not self._check_pause():
+                break
             img_url, error_detail = self._search_artist_image(artist_name, ctx, source)
             if img_url:
                 self._log(f"     [ok] URL found", "success")
             else:
                 self._log(f"     [X] {error_detail}", "error")
-            search_results.append((artist_name, img_url, save_path, error_detail))
+            self._session_search_results.append((artist_name, img_url, save_path, error_detail))
 
-        # Phase 2: Download
+        self._do_download_phase(self._session_search_results,
+                                self._session_downloaded,
+                                self._session_skipped,
+                                self._session_failed)
+
+    def _search_artist_image(self, artist_name: str, ctx, source: str) -> tuple[Optional[str], str]:
+        """Search for artist image. Returns (url, error_detail)."""
+        import time
+
+        def _fetch_with_retry(fetch_fn, *args, label="", **kwargs):
+            """Call fetch_fn with retry on network errors. 3 attempts, 1s delay."""
+            for attempt in range(3):
+                try:
+                    result = fetch_fn(*args, **kwargs)
+                    if result:
+                        return result
+                    return None  # clean miss, no retry
+                except (ConnectionError, TimeoutError, OSError) as e:
+                    if attempt < 2:
+                        self._log(f"     Network error (attempt {attempt+1}/3): {e}", "warning")
+                        time.sleep(2.0)
+                    else:
+                        self._log(f"     Network error after 3 attempts, skipping", "error")
+                        return None
+            return None
+
+        # Step 0: Check cache
+        cached = self.cache.get(artist_name, source)
+        if cached:
+            self._log(f"     Cached URL -- using cached result", "skip")
+            return cached, ""
+
+        tried = []
+
+        # Step 1: Album+year context
+        albums_sorted = sorted(
+            ctx.album_track_counts.keys(),
+            key=lambda a: ctx.album_track_counts[a],
+            reverse=True,
+        )[:5]
+        for album_name in albums_sorted:
+            year_ctx = ctx.album_years.get(album_name, "")
+            self._log(
+                f"  Trying album: {album_name}"
+                + (f" ({year_ctx})" if year_ctx else "")
+                + "...",
+                "info",
+            )
+            img_url = _fetch_with_retry(fetch_artist_image, artist_name, source,
+                album_name=album_name, year=year_ctx, genres=ctx.genres)
+            if img_url:
+                self.cache.put(artist_name, source, img_url)
+                return img_url, ""
+            tried.append(f"album:{album_name}")
+            time.sleep(0.5)
+
+        # Step 2: Track+artist
+        tracks_sample = list(ctx.track_names)[:5]
+        for track_name in tracks_sample:
+            self._log(f"  Trying track: {track_name}...", "info")
+            img_url = _fetch_with_retry(fetch_artist_image, artist_name, source,
+                genres=ctx.genres, track_name=track_name)
+            if img_url:
+                self.cache.put(artist_name, source, img_url)
+                return img_url, ""
+            tried.append(f"track:{track_name}")
+            time.sleep(0.5)
+
+        # Step 3: Direct name search
+        self._log(f"  Searching by name: {artist_name}...", "info")
+        img_url = _fetch_with_retry(fetch_artist_image, artist_name, source,
+            album_name="", year="", genres=ctx.genres)
+        if img_url:
+            self.cache.put(artist_name, source, img_url)
+            return img_url, ""
+        tried.append("name")
+        time.sleep(0.5)
+
+        # Step 3.5: Track-only fallback
+        tracks_all = list(ctx.track_names)
+        tracks_sample = tracks_all[:5]
+        if tracks_all:
+            self._log(f"  Track-only fallback ({len(tracks_sample)}/{len(tracks_all)} tracks)...", "info")
+            for track_name in tracks_sample:
+                self._log(f"    track: {track_name}...", "info")
+                img_url = _fetch_with_retry(fetch_artist_image_by_track_only,
+                    track_name, artist_name, source, genres=ctx.genres)
+                if img_url:
+                    self._log(f"  Track-only match via: {track_name}", "success")
+                    self.cache.put(artist_name, source, img_url)
+                    return img_url, ""
+                time.sleep(0.5)
+            tried.append("track_only")
+
+        # Step 3.6: Album-only fallback
+        albums_all = sorted(
+            ctx.album_track_counts.keys(),
+            key=lambda a: ctx.album_track_counts[a],
+            reverse=True,
+        )[:5]
+        if albums_all:
+            self._log(f"  Album-only fallback ({len(albums_all)} albums)...", "info")
+            for album_name in albums_all:
+                img_url = _fetch_with_retry(fetch_artist_image_by_album_only,
+                    album_name, artist_name, source, genres=ctx.genres)
+                if img_url:
+                    self._log(f"  Album-only match via: {album_name}", "success")
+                    self.cache.put(artist_name, source, img_url)
+                    return img_url, ""
+                time.sleep(0.5)
+            tried.append("album_only")
+
+        # Step 4: Candidate picker — absolute last resort
+        candidates = search_artist_candidates(artist_name, source)
+        if len(candidates) == 1:
+            url = fetch_artist_image_by_id(candidates[0])
+            if url:
+                self.cache.put(artist_name, source, url)
+            return url, "" if url else "no image for candidate"
+        elif len(candidates) > 1:
+            chosen = self._prompt_artist_choice(artist_name, candidates)
+            if chosen:
+                for attempt in range(3):
+                    url = fetch_artist_image_by_id(chosen)
+                    if url:
+                        self.cache.put(artist_name, source, url)
+                        return url, ""
+                    if attempt < 2:
+                        time.sleep(1.0)
+                return None, "no image for chosen candidate"
+            return None, "skipped candidate selection"
+
+        detail = "tried: " + ", ".join(tried) if tried else "no results from any search"
+        return None, detail
+
+    # -- Dialog prompts (thread-safe) --------------------------------------
+
+    def _prompt_multi_artist(self, original_name: str, alternatives: list[str]):
+        return _prompt_dialog(self, MultiArtistDialog, original_name, alternatives)
+
+    def _prompt_merge_artists(self, groups, artists):
+        return _prompt_dialog(self, MergeArtistsDialog, groups, artists)
+
+    def _prompt_artist_choice(self, artist_name, candidates):
+        return _prompt_dialog(self, ArtistChoiceDialog, artist_name, candidates)
+
+    def _do_download_phase(self, search_results, downloaded=0, skipped=0, failed=0):
+        """Phase 2: download images from search results."""
+        import time
         found_count = sum(1 for _, u, _, _ in search_results if u)
         self.after(0, self.phase_var.set, f"Phase 2/2: Downloading {found_count} image(s)...")
         self._log(f"\nDownloading {found_count} image(s)...\n", "info")
 
-        _counters = [0, 0]
+        _counters = [downloaded, failed]
+
+        skip = self.skip_var.get()
+
+        _download_delay = 0.0
 
         def _do_download(item):
+            nonlocal _download_delay
             name, url, path, _ = item
             if not url:
                 return name, None, _, "search failed"
+            # Skip if image already exists on disk
+            if skip:
+                for ext in (".jpg", ".png", ".jpeg"):
+                    if Path(str(path) + ext).exists():
+                        return name, Path(str(path) + ext), url, ""
+            self._check_pause()
+            if not self.running:
+                return name, None, _, "stopped"
+            # 1-second delay between downloads to avoid rate limiting
+            elapsed = time.time() - _download_delay
+            if elapsed < 1.0:
+                time.sleep(1.0 - elapsed)
+            _download_delay = time.time()
             result, dl_err = download_image(url, path,
                                       output_format=self.settings.output_format,
                                       jpeg_quality=self.settings.jpeg_quality)
@@ -921,146 +1432,15 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
         if self._failed_items:
             self.after(0, self.retry_btn.configure, {"state": tk.NORMAL})
             self._log("Click 'Retry Failed' to try again.", "info")
+            self._auto_export_log()
         self._finish()
-
-    def _search_artist_image(self, artist_name: str, ctx, source: str) -> tuple[Optional[str], str]:
-        """Search for artist image. Returns (url, error_detail)."""
-        # Step 0: Check cache
-        cached = self.cache.get(artist_name, source)
-        if cached:
-            self._log(f"     Cached URL -- checking candidates...", "skip")
-            resolved = self._resolve_with_candidates(artist_name, source, cached)
-            return resolved, ""
-
-        tried = []
-
-        # Step 1: Album+year context
-        albums_sorted = sorted(
-            ctx.album_track_counts.keys(),
-            key=lambda a: ctx.album_track_counts[a],
-            reverse=True,
-        )[:5]
-        for album_name in albums_sorted:
-            year_ctx = ctx.album_years.get(album_name, "")
-            self._log(
-                f"  Trying album: {album_name}"
-                + (f" ({year_ctx})" if year_ctx else "")
-                + "...",
-                "info",
-            )
-            img_url = fetch_artist_image(
-                artist_name, source,
-                album_name=album_name, year=year_ctx,
-                genres=ctx.genres,
-            )
-            if img_url:
-                self.cache.put(artist_name, source, img_url)
-                return self._resolve_with_candidates(artist_name, source, img_url), ""
-            tried.append(f"album:{album_name}")
-
-        # Step 2: Track+artist
-        tracks_sample = list(ctx.track_names)[:5]
-        for track_name in tracks_sample:
-            self._log(f"  Trying track: {track_name}...", "info")
-            img_url = fetch_artist_image(
-                artist_name, source,
-                genres=ctx.genres, track_name=track_name,
-            )
-            if img_url:
-                self.cache.put(artist_name, source, img_url)
-                return self._resolve_with_candidates(artist_name, source, img_url), ""
-            tried.append(f"track:{track_name}")
-
-        # Step 3: Direct name search
-        self._log(f"  Searching by name: {artist_name}...", "info")
-        img_url = fetch_artist_image(
-            artist_name, source,
-            album_name="", year="",
-            genres=ctx.genres,
-        )
-        if img_url:
-            self.cache.put(artist_name, source, img_url)
-            return self._resolve_with_candidates(artist_name, source, img_url), ""
-        tried.append("name")
-
-        # Step 3.5: Track-only fallback
-        tracks_all = list(ctx.track_names)
-        tracks_sample = tracks_all[:5]
-        if tracks_all:
-            self._log(f"  Track-only fallback ({len(tracks_sample)}/{len(tracks_all)} tracks)...", "info")
-            for track_name in tracks_sample:
-                self._log(f"    track: {track_name}...", "info")
-                img_url = fetch_artist_image_by_track_only(
-                    track_name, artist_name, source, genres=ctx.genres,
-                )
-                if img_url:
-                    self._log(f"  Track-only match via: {track_name}", "success")
-                    self.cache.put(artist_name, source, img_url)
-                    return self._resolve_with_candidates(artist_name, source, img_url), ""
-            tried.append("track_only")
-
-        # Step 3.6: Album-only fallback
-        albums_all = sorted(
-            ctx.album_track_counts.keys(),
-            key=lambda a: ctx.album_track_counts[a],
-            reverse=True,
-        )[:5]
-        if albums_all:
-            self._log(f"  Album-only fallback ({len(albums_all)} albums)...", "info")
-            for album_name in albums_all:
-                img_url = fetch_artist_image_by_album_only(
-                    album_name, artist_name, source, genres=ctx.genres,
-                )
-                if img_url:
-                    self._log(f"  Album-only match via: {album_name}", "success")
-                    self.cache.put(artist_name, source, img_url)
-                    return self._resolve_with_candidates(artist_name, source, img_url), ""
-            tried.append("album_only")
-
-        # Step 4: Candidate picker as last resort
-        candidates = search_artist_candidates(artist_name, source)
-        if len(candidates) == 1:
-            url = fetch_artist_image_by_id(candidates[0])
-            if url:
-                self.cache.put(artist_name, source, url)
-            return url, "" if url else "no image for candidate"
-        elif len(candidates) > 1:
-            chosen = self._prompt_artist_choice(artist_name, candidates)
-            if chosen:
-                url = fetch_artist_image_by_id(chosen)
-                if url:
-                    self.cache.put(artist_name, source, url)
-                return url, "" if url else "no image for chosen candidate"
-            return None, "skipped candidate selection"
-
-        detail = "tried: " + ", ".join(tried) if tried else "no results from any search"
-        return None, detail
-
-    def _resolve_with_candidates(self, artist_name: str, source: str,
-                                  current_url: str) -> Optional[str]:
-        candidates = search_artist_candidates(artist_name, source)
-        if len(candidates) > 1:
-            chosen = self._prompt_artist_choice(artist_name, candidates)
-            if chosen:
-                result = fetch_artist_image_by_id(chosen)
-                if result:
-                    return result
-        return current_url
-
-    # -- Dialog prompts (thread-safe) --------------------------------------
-
-    def _prompt_multi_artist(self, original_name: str, alternatives: list[str]):
-        return _prompt_dialog(self, MultiArtistDialog, original_name, alternatives)
-
-    def _prompt_merge_artists(self, groups, artists):
-        return _prompt_dialog(self, MergeArtistsDialog, groups, artists)
-
-    def _prompt_artist_choice(self, artist_name, candidates):
-        return _prompt_dialog(self, ArtistChoiceDialog, artist_name, candidates)
 
     # -- Finish ------------------------------------------------------------
 
     def _finish(self):
+        self._clear_session()
+        self._paused = False
+        self._pause_event.set()
         run_gen = self._run_counter
         self.after(0, lambda: self._set_finished(run_gen))
 
@@ -1068,8 +1448,11 @@ class App(tk.Tk if not HAS_DND else tkdnd.Tk):
         if run_gen != self._run_counter:
             return
         self.running = False
+        self._paused = False
+        self._pause_event.set()
         self.start_btn.configure(state=tk.NORMAL)
         self.stop_btn.configure(state=tk.DISABLED)
+        self.pause_btn.configure(state=tk.DISABLED, text="Pause")
         self.progress_var.set(100)
         self.status_var.set("Finished")
         self.after(0, self.phase_var.set, "")
@@ -1088,7 +1471,7 @@ class SettingsDialog(tk.Toplevel):
         t = settings.get_theme()
         self.configure(bg=t["bg"])
         self.title("Settings")
-        self.geometry("500x560")
+        self.geometry("640x580")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -1281,8 +1664,8 @@ class MultiArtistDialog(tk.Toplevel):
         t = parent.settings.get_theme()
         self.configure(bg=t["bg"])
         self.title("Multiple artists in tag")
-        self.geometry("420x320")
-        self.minsize(380, 260)
+        self.geometry("480x380")
+        self.minsize(440, 340)
         self.transient(parent)
         self.grab_set()
 
@@ -1337,15 +1720,15 @@ class MultiArtistDialog(tk.Toplevel):
     def _ok(self):
         sel = self.listbox.curselection()
         if sel:
-            self.master._dialog_result = self.listbox.get(sel[0])
+            self._dialog_result = self.listbox.get(sel[0])
         self.destroy()
 
     def _use_first(self):
-        self.master._dialog_result = self.listbox.get(0)
+        self._dialog_result = self.listbox.get(0)
         self.destroy()
 
     def _skip(self):
-        self.master._dialog_result = None
+        self._dialog_result = None
         self.destroy()
 
 
@@ -1498,7 +1881,7 @@ class MergeArtistsDialog(tk.Toplevel):
             var.set(val)
 
     def _skip_all(self):
-        self.master._dialog_result = {}
+        self._dialog_result = {}
         self.destroy()
 
     def _apply(self):
@@ -1515,11 +1898,11 @@ class MergeArtistsDialog(tk.Toplevel):
             self.master.settings.artist_aliases.update(merge_map)
             self.master.settings.save()
 
-        self.master._dialog_result = merge_map
+        self._dialog_result = merge_map
         self.destroy()
 
     def _cancel(self):
-        self.master._dialog_result = None
+        self._dialog_result = None
         self.destroy()
 
 
@@ -1649,13 +2032,13 @@ class ArtistChoiceDialog(tk.Toplevel):
         if not sel:
             messagebox.showwarning("No selection", "Please select an artist from the list.", parent=self)
             return
-        self.master._dialog_result = self.candidates[sel[0]]
+        self._dialog_result = self.candidates[sel[0]]
         self.destroy()
 
     def _skip(self):
-        self.master._dialog_result = None
+        self._dialog_result = None
         self.destroy()
 
     def _cancel(self):
-        self.master._dialog_result = None
+        self._dialog_result = None
         self.destroy()

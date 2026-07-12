@@ -10,6 +10,7 @@ from typing import Optional
 CONFIG_DIR = Path.home() / ".config" / "artist_art_downloader"
 CONFIG_FILE = CONFIG_DIR / "settings.json"
 CACHE_FILE = CONFIG_DIR / "artist_cache.json"
+SCAN_CACHE_FILE = CONFIG_DIR / "scan_cache.json"
 
 _MAX_RECENT_FOLDERS = 10
 

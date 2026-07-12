@@ -19,6 +19,11 @@ CYRILLIC_MAP = str.maketrans({
     "\u041d": "N", "\u041e": "O", "\u041f": "P", "\u0420": "R", "\u0421": "S", "\u0422": "T", "\u0423": "U",
     "\u0424": "F", "\u0425": "Kh", "\u0426": "Ts", "\u0427": "Ch", "\u0428": "Sh", "\u0429": "Shch",
     "\u042a": "", "\u042b": "Y", "\u042c": "", "\u042d": "E", "\u042e": "Yu", "\u042f": "Ya",
+    # Extended Cyrillic (non-Russian languages)
+    "\u0452": "dj", "\u0453": "gj", "\u0454": "je", "\u0455": "s", "\u0456": "i", "\u0457": "yi",
+    "\u0458": "j", "\u0459": "lj", "\u045a": "nj", "\u045b": "c", "\u045c": "k", "\u045e": "u", "\u045f": "dz",
+    "\u0402": "Dj", "\u0403": "Gj", "\u0404": "Je", "\u0405": "S", "\u0406": "I", "\u0407": "Yi",
+    "\u0408": "J", "\u0409": "Lj", "\u040a": "Nj", "\u040b": "C", "\u040c": "K", "\u040e": "U", "\u040f": "Dz",
 })
 
 # ---------------------------------------------------------------------------
@@ -42,6 +47,10 @@ HIRAGANA_MAP = str.maketrans({
     "\u3070": "ba", "\u3073": "bi", "\u3076": "bu", "\u3079": "be", "\u307c": "bo",
     "\u3071": "pa", "\u3074": "pi", "\u3077": "pu", "\u307a": "pe", "\u307d": "po",
     "\u3063": "",
+    # Small kana
+    "\u3041": "a", "\u3043": "i", "\u3045": "u", "\u3047": "e", "\u3049": "o",
+    # Vu and small ka/ke
+    "\u3094": "vu", "\u3095": "ka", "\u3096": "ke",
 })
 
 HIRAGANA_MULTI = [
@@ -79,6 +88,14 @@ KATAKANA_MAP = str.maketrans({
     "\u30d0": "ba", "\u30d3": "bi", "\u30d6": "bu", "\u30d9": "be", "\u30dc": "bo",
     "\u30d1": "pa", "\u30d4": "pi", "\u30d7": "pu", "\u30da": "pe", "\u30dd": "po",
     "\u30c3": "",
+    # Small kana
+    "\u30a1": "a", "\u30a3": "i", "\u30a5": "u", "\u30a7": "e", "\u30a9": "o",
+    # Vu, small ka/ke, small wa
+    "\u30f4": "vu", "\u30f5": "ka", "\u30f6": "ke", "\u30ee": "wa",
+    # Archaic wi/we
+    "\u30f0": "i", "\u30f1": "e",
+    # Long vowel mark (remove) and middle dot (space)
+    "\u30fc": "", "\u30fb": " ",
 })
 
 KATAKANA_MULTI = [
@@ -93,6 +110,21 @@ KATAKANA_MULTI = [
     ("\u30b8\u30e3", "ja"), ("\u30b8\u30e6", "ju"), ("\u30b8\u30e7", "jo"),
     ("\u30d3\u30e3", "bya"), ("\u30d3\u30e6", "byu"), ("\u30d3\u30e7", "byo"),
     ("\u30d4\u30e3", "pya"), ("\u30d4\u30e6", "pyu"), ("\u30d4\u30e7", "pyo"),
+    # Palatalized consonants with small ya/yu/yo
+    ("\u30c6\u30e3", "tya"), ("\u30c6\u30e5", "tyu"), ("\u30c6\u30e7", "tyo"),
+    ("\u30c7\u30e3", "dya"), ("\u30c7\u30e5", "dyu"), ("\u30c7\u30e7", "dyo"),
+    ("\u30d5\u30e3", "fya"), ("\u30d5\u30e5", "fyu"), ("\u30d5\u30e7", "fyo"),
+    ("\u30f4\u30e3", "vya"), ("\u30f4\u30e5", "vyu"), ("\u30f4\u30e7", "vyo"),
+    # Extended katakana for loanwords
+    ("\u30c6\u30a3", "ti"), ("\u30c7\u30a3", "di"),
+    ("\u30c8\u30a5", "tu"), ("\u30c9\u30a5", "du"),
+    ("\u30d5\u30a1", "fa"), ("\u30d5\u30a3", "fi"),
+    ("\u30d5\u30a7", "fe"), ("\u30d5\u30a9", "fo"),
+    ("\u30f4\u30a1", "va"), ("\u30f4\u30a3", "vi"),
+    ("\u30f4\u30a7", "ve"), ("\u30f4\u30a9", "vo"),
+    ("\u30a6\u30a3", "wi"), ("\u30a6\u30a7", "we"), ("\u30a6\u30a9", "wo"),
+    ("\u30c4\u30a1", "tsa"), ("\u30c4\u30a3", "tsi"),
+    ("\u30c4\u30a7", "tse"), ("\u30c4\u30a9", "tso"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -124,59 +156,31 @@ HANGUL_MAP = str.maketrans({
 # ---------------------------------------------------------------------------
 
 CHINESE_MAP = str.maketrans({
-    "\u5468": "zhou", "\u6770": "jie", "\u4f26": "lun", "\u5029": "lun", "\u738b": "wang",
-    "\u674e": "li", "\u7ea2": "hong", "\u7acb": "li", "\u5f20": "zhang", "\u7ae0": "zhang",
-    "\u9648": "chen", "\u8fb6": "chen", "\u5218": "liu", "\u6d93": "liu", "\u9ec4": "huang",
-    "\u74dc": "huang", "\u6797": "lin", "\u5434": "wu", "\u6bc5": "wu", "\u90d1": "zheng",
-    "\u904d": "zheng", "\u8521": "tsai", "\u66fe": "tseng", "\u4fde": "yu", "\u5362": "lu",
-    "\u9c81": "lu", "\u5f90": "xu", "\u8bb9": "xu", "\u8c22": "xie", "\u859b": "xie",
-    "\u97e9": "han", "\u97f3": "han", "\u6768": "yang", "\u626c": "yang", "\u6731": "zhu",
-    "\u9a6c": "ma", "\u7801": "ma", "\u80e1": "hu", "\u90ed": "guo", "\u4f55": "he",
-    "\u9ad8": "gao", "\u7f57": "luo", "\u950f": "luo", "\u6881": "liang", "\u5b8b": "song",
-    "\u90d1": "zheng", "\u5510": "tang", "\u51af": "feng", "\u51ab": "feng", "\u865e": "yu",
-    "\u8463": "dong", "\u8427": "xiao", "\u7b5b": "xiao", "\u7a0b": "cheng", "\u66f9": "cao",
-    "\u5143": "yuan", "\u9093": "deng", "\u706f": "deng", "\u8bb8": "xu", "\u5bcc": "fu",
-    "\u6c88": "shen", "\u66fe": "zeng", "\u5f6d": "peng", "\u5415": "lv", "\u82cf": "su",
-    "\u82b9": "su", "\u5362": "lu", "\u9c81": "lu", "\u6c5f": "jiang", "\u59dc": "jiang",
-    "\u8521": "tsai", "\u4e01": "ding", "\u97e6": "wei", "\u859b": "xue", "\u53f6": "ye",
-    "\u53f6": "ye", "\u95fb": "yan", "\u8a00": "yan", "\u7389": "yu", "\u6f58": "pan",
-    "\u675c": "du", "\u6234": "dai", "\u590f": "xia", "\u949f": "zhong", "\u79cd": "zhong",
-    "\u6c6a": "wang", "\u7530": "tian", "\u4ec1": "ren", "\u59dc": "jiang", "\u5e06": "fan",
-    "\u65b9": "fang", "\u77f3": "shi", "\u59da": "yao", "\u8c2d": "tan", "\u8c2d": "tan",
-    "\u5ed6": "liao", "\u90b9": "zou", "\u90b9": "zou", "\u718a": "xiong", "\u91d1": "jin",
-    "\u5362": "lu", "\u9c81": "lu", "\u90dd": "hao", "\u5b54": "kong", "\u767d": "bai",
-    "\u5d14": "cui", "\u5eb7": "kang", "\u8305": "mao", "\u4ec7": "qiu", "\u7434": "qin",
-    "\u59dc": "jiang", "\u77f3": "shi", "\u53e4": "gu", "\u53e4": "gu", "\u4faf": "hou",
-    "\u90b5": "shao", "\u5b5f": "meng", "\u9f99": "long", "\u9f99": "long", "\u4e07": "wan",
-    "\u4e07": "wan", "\u7aef": "duan", "\u96f7": "lei", "\u94b1": "qian", "\u94b1": "qian",
-    "\u5510": "tang", "\u5510": "tang", "\u6bb7": "yin", "\u798f": "li", "\u7faa": "yi",
-    "\u660c": "chang", "\u5434": "wu", "\u4fa8": "qiao", "\u4fa8": "qiao", "\u4f55": "he",
-    "\u4f55": "he", "\u8d56": "lai", "\u8d56": "lai", "\u5de5": "gong", "\u5de5": "gong",
-    "\u6587": "wen", "\u4e50": "le", "\u4e50": "le", "\u534e": "hua", "\u534e": "hua",
-    "\u65ed": "xu", "\u5b59": "sun", "\u5b59": "sun", "\u9a6c": "ma", "\u80e1": "hu",
-    "\u6731": "zhu", "\u90ed": "guo", "\u4f55": "he", "\u7f57": "luo", "\u6881": "liang",
-    "\u5b8b": "song", "\u90d1": "zheng", "\u8c22": "xie", "\u97e9": "han", "\u5510": "tang",
-    "\u51af": "feng", "\u865e": "yu", "\u8463": "dong", "\u8427": "xiao", "\u7a0b": "cheng",
-    "\u66f9": "cao", "\u9093": "deng", "\u8bb8": "xu", "\u5bcc": "fu", "\u6c88": "shen",
-    "\u66fe": "zeng", "\u5f6d": "peng", "\u82cf": "su", "\u5362": "lu", "\u6c5f": "jiang",
-    "\u8521": "tsai", "\u4e01": "ding", "\u97e6": "wei", "\u859b": "xue", "\u53f6": "ye",
-    "\u95fb": "yan", "\u6f58": "pan", "\u675c": "du", "\u6234": "dai", "\u590f": "xia",
-    "\u949f": "zhong", "\u6c6a": "wang", "\u7530": "tian", "\u4ec1": "ren", "\u59dc": "jiang",
+    # Common Chinese surnames
+    "\u738b": "wang", "\u674e": "li", "\u5f20": "zhang", "\u5218": "liu", "\u9648": "chen",
+    "\u6768": "yang", "\u9ec4": "huang", "\u5468": "zhou", "\u5434": "wu", "\u5f90": "xu",
+    "\u5b59": "sun", "\u9a6c": "ma", "\u6731": "zhu", "\u80e1": "hu", "\u90ed": "guo",
+    "\u4f55": "he", "\u6797": "lin", "\u9ad8": "gao", "\u7f57": "luo", "\u6881": "liang",
+    "\u5b8b": "song", "\u5510": "tang", "\u8c22": "xie", "\u97e9": "han", "\u51af": "feng",
+    "\u865e": "yu", "\u8463": "dong", "\u8427": "xiao", "\u7a0b": "cheng", "\u66f9": "cao",
+    "\u5143": "yuan", "\u9093": "deng", "\u8bb8": "xu", "\u5bcc": "fu", "\u6c88": "shen",
+    "\u5f6d": "peng", "\u5415": "lv", "\u82cf": "su", "\u5362": "lu", "\u6c5f": "jiang",
+    "\u59dc": "jiang", "\u8521": "cai", "\u4e01": "ding", "\u97e6": "wei", "\u53f6": "ye",
+    "\u95fb": "wen", "\u7389": "yu", "\u6f58": "pan", "\u675c": "du", "\u6234": "dai",
+    "\u590f": "xia", "\u949f": "zhong", "\u6c6a": "wang", "\u7530": "tian", "\u4ec1": "ren",
     "\u5e06": "fan", "\u65b9": "fang", "\u77f3": "shi", "\u59da": "yao", "\u8c2d": "tan",
-    "\u5ed6": "liao", "\u90b9": "zou", "\u718a": "xiong", "\u91d1": "jin", "\u5362": "lu",
-    "\u5b54": "kong", "\u767d": "bai", "\u5d14": "cui", "\u5eb7": "kang", "\u8305": "mao",
-    "\u4ec7": "qiu", "\u7434": "qin", "\u59dc": "jiang", "\u77f3": "shi", "\u53e4": "gu",
-    "\u4faf": "hou", "\u90b5": "shao", "\u5b5f": "meng", "\u9f99": "long", "\u4e07": "wan",
-    "\u7aef": "duan", "\u96f7": "lei", "\u94b1": "qian", "\u5510": "tang", "\u6bb7": "yin",
-    "\u798f": "li", "\u7faa": "yi", "\u660c": "chang", "\u5434": "wu", "\u4fa8": "qiao",
-    "\u4f55": "he", "\u8d56": "lai", "\u5de5": "gong", "\u6587": "wen", "\u534e": "hua",
-    "\u6b4c": "ge", "\u821e": "wu", "\u4e50": "le", "\u4e50": "le", "\u97f3": "yin",
-    "\u58f0": "sheng", "\u58f0": "sheng", "\u8c03": "diao", "\u8c03": "diao",
-    "\u66f2": "qu", "\u8bcd": "ci", "\u8bcd": "ci", "\u8bd7": "shi", "\u8bd7": "shi",
-    "\u4e66": "shu", "\u4e66": "shu", "\u753b": "hua", "\u753b": "hua", "\u58a8": "mo",
-    "\u7b14": "bi", "\u7b14": "bi", "\u7434": "qin", "\u68cb": "qi", "\u4e66": "shu",
-    "\u753b": "hua", "\u753b": "hua", "\u9e1f": "niao", "\u9e1f": "niao",
-    "\u9c7c": "yu", "\u866b": "chong", "\u517d": "shou", "\u517d": "shou",
+    "\u5ed6": "liao", "\u90b9": "zou", "\u718a": "xiong", "\u91d1": "jin", "\u5b54": "kong",
+    "\u767d": "bai", "\u5d14": "cui", "\u5eb7": "kang", "\u8305": "mao", "\u4ec7": "qiu",
+    "\u7434": "qin", "\u4faf": "hou", "\u90b5": "shao", "\u5b5f": "meng", "\u9f99": "long",
+    "\u4e07": "wan", "\u7aef": "duan", "\u96f7": "lei", "\u94b1": "qian", "\u6bb7": "yin",
+    "\u798f": "fu", "\u7faa": "yi", "\u660c": "chang", "\u4fa8": "qiao", "\u8d56": "lai",
+    "\u5de5": "gong", "\u6587": "wen", "\u534e": "hua", "\u65ed": "xu",
+    # Artist-related characters
+    "\u6b4c": "ge", "\u821e": "wu", "\u4e50": "le", "\u97f3": "yin",
+    "\u58f0": "sheng", "\u8c03": "diao", "\u66f2": "qu", "\u8bcd": "ci",
+    "\u8bd7": "shi", "\u4e66": "shu", "\u753b": "hua", "\u58a8": "mo",
+    "\u7b14": "bi", "\u68cb": "qi", "\u9e1f": "niao", "\u9c7c": "yu",
+    "\u866b": "chong", "\u517d": "shou",
 })
 
 # ---------------------------------------------------------------------------

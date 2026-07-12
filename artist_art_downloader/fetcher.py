@@ -60,12 +60,26 @@ atexit.register(_SESSION.close)
 
 # Rate limiting: track last request time per host
 _last_request_time: dict[str, float] = {}
-_RATE_LIMIT_DELAY = 0.15  # seconds between requests to same host
+_RATE_LIMIT_DELAY = 0.5  # seconds between requests to same host
+_RATE_LIMIT_COOLDOWN = 30  # seconds to wait after hitting a 429
+_last_429_time: dict[str, float] = {}  # host -> time of last 429
 
 
 def _rate_limit(url: str):
-    """Ensure minimum delay between requests to the same host."""
+    """Ensure minimum delay between requests to the same host.
+
+    If the host recently returned a 429, enforce a longer cooldown.
+    """
     host = urlparse(url).netloc
+    now = time.time()
+
+    # Check if host is in 429 cooldown
+    cooldown_until = _last_429_time.get(host, 0.0) + _RATE_LIMIT_COOLDOWN
+    if now < cooldown_until:
+        wait = cooldown_until - now
+        time.sleep(wait)
+
+    # Normal per-host rate limit
     last = _last_request_time.get(host, 0.0)
     elapsed = time.time() - last
     if elapsed < _RATE_LIMIT_DELAY:
@@ -100,11 +114,15 @@ def _request_with_retry(method: str, url: str, max_retries: int = 3,
                 return resp
             # Retry on 429 (Too Many Requests) and 5xx (server errors)
             if resp.status_code == 429 or resp.status_code >= 500:
+                # Record 429 for global cooldown
+                if resp.status_code == 429:
+                    host = urlparse(url).netloc
+                    _last_429_time[host] = time.time()
                 if attempt < max_retries - 1:
                     wait = (1 * (2 ** attempt)) + random.uniform(0, 0.5)
                     time.sleep(wait)
                     continue
-                return resp
+                return None
             # Non-retryable 4xx (400, 403, 404, etc.) — return immediately
             return resp
         except requests.RequestException:
@@ -718,7 +736,7 @@ def download_image(url: str, save_path: Path, output_format: str = "jpeg",
                 cl = 0
             if cl == 0:
                 return None, "content-length is 0"
-            if cl > 20 * 1024 * 1024:  # 20MB max
+            if cl > 50 * 1024 * 1024:  # 50MB max
                 return None, f"file too large: {cl} bytes"
 
         # Stream download to avoid loading entire response into memory
@@ -728,8 +746,8 @@ def download_image(url: str, save_path: Path, output_format: str = "jpeg",
             if chunk:
                 chunks.append(chunk)
                 total_size += len(chunk)
-                if total_size > 20 * 1024 * 1024:  # 20MB safety limit
-                    return None, "file too large (stream exceeded 20MB)"
+                if total_size > 50 * 1024 * 1024:  # 50MB safety limit
+                    return None, "file too large (stream exceeded 50MB)"
         data = b"".join(chunks)
         if len(data) == 0:
             return None, "empty response body"

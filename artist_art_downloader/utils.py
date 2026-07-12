@@ -344,6 +344,7 @@ def expand_and_variants(text: str) -> list[str]:
     - Accent-stripped variant (e.g. "Roger Fakhr" -> "Roger Fakhr")
     - Accent-adding variants for short text ?3 words (e.g. "Roger Fakhr" -> "Roger Fakhr", ...)
     - &-swap variants for all the above
+    - Transliterated Latin variant for non-Latin scripts (e.g. katakana -> romaji)
 
     Accent-adding is limited to short text (?3 words) to avoid combinatorial
     explosion on combined queries like "Album Name Artist Name" (4+ words).
@@ -386,6 +387,12 @@ def expand_and_variants(text: str) -> list[str]:
             replaced = text.replace("&", word)
             if replaced != text and replaced not in variants:
                 variants.append(replaced)
+    # Transliterated Latin variant for non-Latin scripts (e.g. katakana -> romaji)
+    # This ensures API search queries are in Latin script which APIs understand
+    if any(ord(c) > 0x7E for c in text):
+        translit = transliterate_to_latin(text)
+        if translit and translit not in variants:
+            variants.append(translit)
     # Hard cap: never return more than 8 variants to avoid API flooding
     return variants[:8]
 

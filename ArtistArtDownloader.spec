@@ -1,16 +1,27 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_all
+
+datas = [('artist_art_downloader', 'artist_art_downloader')]
+binaries = []
+hiddenimports = ['PIL._tkinter_finder', 'customtkinter']
+datas += collect_data_files('PIL')
+hiddenimports += collect_submodules('PIL')
+tmp_ret = collect_all('customtkinter')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['run.py'],
+    ['artist_art_downloader\\main.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=['pystray', 'PIL.ImageDraw', 'PIL.ImageTk'],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['numpy', 'pandas', 'scipy', 'matplotlib', 'setuptools', 'pkg_resources'],
+    excludes=[],
     noarchive=False,
     optimize=0,
 )
@@ -35,5 +46,4 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=[],
 )
