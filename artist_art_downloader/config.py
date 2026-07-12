@@ -10,7 +10,6 @@ from typing import Optional
 CONFIG_DIR = Path.home() / ".config" / "artist_art_downloader"
 CONFIG_FILE = CONFIG_DIR / "settings.json"
 CACHE_FILE = CONFIG_DIR / "artist_cache.json"
-CACHE_TTL = 7 * 24 * 3600  # 7 days
 
 THEMES = {
     "gruvbox": {
@@ -209,13 +208,11 @@ class ArtistCache:
         CACHE_FILE.write_text(json.dumps(self._data, indent=2))
 
     def get(self, artist_name: str, source: str) -> Optional[str]:
-        """Return cached image URL if fresh enough, else None."""
+        """Return cached image URL, or None if not cached."""
         key = f"{artist_name}|{source}"
         with self._lock:
             entry = self._data.get(key)
         if not entry:
-            return None
-        if time.time() - entry.get("ts", 0) > CACHE_TTL:
             return None
         return entry.get("url")
 
