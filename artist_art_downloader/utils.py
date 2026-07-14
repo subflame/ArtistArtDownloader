@@ -271,7 +271,6 @@ def strip_accents(text: str) -> str:
 # Search-query helpers
 # ---------------------------------------------------------------------------
 
-_AND_PATTERN = re.compile(r"\b(and|et|und|y|e)\b", re.IGNORECASE)
 _AND_WORDS = ["and", "et", "und", "y", "e"]
 
 
@@ -378,7 +377,7 @@ def expand_and_variants(text: str) -> list[str]:
                     variants.append(v)
     # Replace any "and"-like word with "&"
     for base in list(variants):  # iterate over copy since we append
-        swapped = _AND_PATTERN.sub("&", base)
+        swapped = _CONJUNCTIONS.sub("&", base)
         if swapped != base and swapped not in variants:
             variants.append(swapped)
     # If "&" is present, try replacing with each "and"-like word

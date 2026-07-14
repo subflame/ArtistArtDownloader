@@ -5,3 +5,23 @@ dist/
 *.spec.bak
 *.egg-info/
 .pytest_cache/
+
+# Build config
+ArtistArtDownloader.spec
+
+# Personal music index
+index.txt
+
+# Test and analysis scripts
+analyze_index.py
+debug_search.py
+test_*.py
+test_*.png
+test_*.ico
+
+# Temp/debug files
+_*.py
+screenshots/
+ui_beta/
+prompt.txt
+nul

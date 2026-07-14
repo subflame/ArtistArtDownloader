@@ -18,7 +18,7 @@ from tinytag import TinyTag
 from .utils import sanitize_filename, transliterate_to_latin
 from .config import SCAN_CACHE_FILE
 
-SCAN_CACHE_VERSION = 1
+SCAN_CACHE_VERSION = 2
 _SCAN_CACHE_LOCK = threading.Lock()
 
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".ogg", ".m4a", ".wma", ".aiff", ".aif"}
@@ -148,22 +148,13 @@ def _build_artist_contexts(
             if not album_dir:
                 continue
 
+        # Compilation (Various Artists) → skip entirely.
+        # Track artist names from compilations are unreliable — often embedded
+        # in brackets inside the track title, or from many different artists
+        # under one "Various" umbrella that we shouldn't process.
         is_comp = entry.get("tags", {}).get("is_compilation", False)
 
         if is_comp:
-            if artist not in artists:
-                artists[artist] = ArtistContext()
-            ctx = artists[artist]
-            album_name = entry.get("tags", {}).get("album")
-            if album_name:
-                ctx.albums.add(album_name)
-            title = entry.get("tags", {}).get("title")
-            if title:
-                ctx.track_names.add(title)
-            genre = entry.get("tags", {}).get("genre")
-            if genre:
-                ctx.genres.add(genre)
-            ctx.album_dirs.add(album_dir)
             continue
 
         if artist not in artists:

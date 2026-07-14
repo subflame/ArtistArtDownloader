@@ -4,6 +4,7 @@ import atexit
 import io
 import random
 import re
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,17 +28,13 @@ DEEZER_ALBUM_SEARCH_URL = "https://api.deezer.com/search/album"
 DEEZER_TRACK_SEARCH_URL = "https://api.deezer.com/search/track"
 ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
 APPLE_MUSIC_BASE_URL = "https://music.apple.com/us/artist"
-MUSICBRAINZ_API_URL = "https://musicbrainz.org/ws/2"
-WIKIDATA_API_URL = "https://www.wikidata.org/wiki/Special:EntityData"
-WIKIMEDIA_COMMONS_URL = "https://commons.wikimedia.org/wiki/Special:FilePath"
+# Image processing limits
 
 # Per-type timeouts
 TIMEOUT_SEARCH = 10
 TIMEOUT_DEEZER_DETAIL = 5
 TIMEOUT_APPLE_PAGE = 10
 TIMEOUT_DOWNLOAD = 30
-TIMEOUT_MUSICBRAINZ = 10
-
 # Search limits (named constants instead of magic numbers)
 _DEEZER_ARTIST_LIMIT = 10
 _DEEZER_ALBUM_LIMIT = 10
@@ -45,7 +42,6 @@ _DEEZER_TRACK_LIMIT = 10
 _ITUNES_ARTIST_LIMIT = 10
 _ITUNES_ALBUM_LIMIT = 25
 _ITUNES_TRACK_LIMIT = 25
-_MAX_SEARCH_CANDIDATES = 8
 _MAX_RETRIES = 3
 
 # Image processing limits
@@ -58,6 +54,7 @@ _PLACEHOLDER_MIN_BITS = 4  # minimum set bits in hash to consider non-uniform
 # Session-level hash tracker to detect duplicate images across artists
 # Maps hash_int -> artist_name for logging/reference
 _session_image_hashes: dict[int, str] = {}
+_session_hash_lock = threading.Lock()
 
 # Rating system weights for image selection
 _RATING_RESOLUTION_WEIGHT = 50.0   # max score for resolution
@@ -98,13 +95,6 @@ _last_request_time: dict[str, float] = {}
 _RATE_LIMIT_DELAY = 0.5  # seconds between requests to same host
 _RATE_LIMIT_COOLDOWN = 30  # seconds to wait after hitting a 429
 _last_429_time: dict[str, float] = {}  # host -> time of last 429
-
-# MusicBrainz requires 1 req/s, has its own rate limiter
-_MB_LAST_REQUEST_TIME: float = 0.0
-_MB_MIN_DELAY = 1.0  # seconds between requests to MusicBrainz API
-
-# User-Agent required by MusicBrainz (must contain contact info)
-_MB_USER_AGENT = "ArtistArtDownloader/1.0.2 (https://github.com/artist-art-downloader)"
 
 
 def _rate_limit(url: str):
@@ -218,12 +208,13 @@ def _is_duplicate_image(data: bytes, artist_name: str) -> bool:
     if h == 0:
         return False  # already caught by _is_uniform_image
 
-    for existing_hash, existing_name in _session_image_hashes.items():
-        if existing_name == artist_name:
-            continue  # same artist, expected match
-        distance = _hamming_distance(h, existing_hash)
-        if distance <= 2:
-            return True  # perceptually identical
+    with _session_hash_lock:
+        for existing_hash, existing_name in _session_image_hashes.items():
+            if existing_name == artist_name:
+                continue  # same artist, expected match
+            distance = _hamming_distance(h, existing_hash)
+            if distance <= 2:
+                return True  # perceptually identical
     return False
 
 
@@ -234,7 +225,8 @@ def _track_image_hash(data: bytes, artist_name: str) -> None:
     """
     h = _compute_dhash(data)
     if h:
-        _session_image_hashes[h] = artist_name
+        with _session_hash_lock:
+            _session_image_hashes[h] = artist_name
 
 
 def _reset_session_hashes() -> None:
@@ -242,7 +234,8 @@ def _reset_session_hashes() -> None:
 
     Called at the start of each new scan/download run.
     """
-    _session_image_hashes.clear()
+    with _session_hash_lock:
+        _session_image_hashes.clear()
 
 
 def _request_with_retry(method: str, url: str, max_retries: int = 3,
